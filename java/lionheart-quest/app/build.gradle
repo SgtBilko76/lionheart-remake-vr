@@ -1,0 +1,105 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Lionheart Remake for Meta Quest (OpenXR).
+// Prerequisite: LionEngine 11.0.0-SNAPSHOT and lionheart-game 1.4.0-SNAPSHOT installed in
+// mavenLocal (mvn install in lionengine and in the lionheart-remake root), see README-QUEST.md.
+
+android {
+    namespace 'com.b3dgs.lionheart.quest'
+    compileSdk 34
+    ndkVersion '27.2.12479018'
+
+    defaultConfig {
+        applicationId 'com.b3dgs.lionheart.quest'
+        minSdk 29
+        targetSdk 32
+        versionCode 1
+        versionName '0.1.0'
+        multiDexEnabled true
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+        externalNativeBuild {
+            cmake {
+                arguments '-DANDROID_STL=c++_static'
+            }
+        }
+    }
+
+    signingConfigs {
+        debugKey {
+            storeFile file(System.getProperty('user.home') + '/.android/debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debugKey
+        }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debugKey
+        }
+    }
+
+    buildFeatures {
+        prefab true
+    }
+
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+
+    compileOptions {
+        coreLibraryDesugaringEnabled true
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main {
+            // Quest-specific assets first (input.xml override), then the game's own resources.
+            assets.srcDirs = ['src/main/assets/', '../../../assets/src/main/resources/']
+        }
+    }
+
+    androidResources {
+        ignoreAssetsPattern 'stage.png:stage1.png:stage2.png:stage3.png:stage_hard.png:stage1_hard.png:stage2_hard.png:stage3_hard.png'
+    }
+
+    packagingOptions {
+        resources {
+            excludes += ['**/lionheart/**', 'META-INF/LICENSE*', 'META-INF/NOTICE*']
+        }
+        jniLibs {
+            useLegacyPackaging true
+        }
+    }
+
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+}
+
+dependencies {
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.5'
+    implementation 'net.java.dev.jna:jna:5.18.0@aar'
+    implementation 'org.khronos.openxr:openxr_loader_for_android:1.1.60'
+    implementation 'com.b3dgs.lionengine:lionengine-core:11.0.0-SNAPSHOT'
+    implementation 'com.b3dgs.lionengine:lionengine-game:11.0.0-SNAPSHOT'
+    implementation 'com.b3dgs.lionengine:lionengine-helper:11.0.0-SNAPSHOT'
+    implementation('com.b3dgs.lionengine:lionengine-audio-sc68:11.0.0-SNAPSHOT') {
+        exclude group: 'net.java.dev.jna'
+    }
+    implementation 'com.b3dgs.lionheart:lionheart-game:1.4.0-SNAPSHOT'
+    implementation 'org.slf4j:slf4j-simple:2.0.17'
+}
