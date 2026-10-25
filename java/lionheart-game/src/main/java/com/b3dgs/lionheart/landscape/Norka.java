@@ -32,7 +32,7 @@ import com.b3dgs.lionheart.constant.Folder;
 /**
  * Norka full background implementation.
  */
-final class Norka extends BackgroundAbstract
+final class Norka extends BackgroundStereo
 {
     private static final int BACK_COUNT = 7;
     private static final int BACK_FH = 4;

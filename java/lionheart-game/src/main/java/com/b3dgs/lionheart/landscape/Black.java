@@ -24,7 +24,7 @@ import com.b3dgs.lionengine.graphic.engine.SourceResolutionProvider;
 /**
  * No background implementation.
  */
-final class Black extends BackgroundAbstract
+final class Black extends BackgroundStereo
 {
     private int width;
     private int height;

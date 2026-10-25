@@ -1,10 +1,13 @@
 /*
  * Lionheart Remake - Meta Quest OpenXR host.
  *
- * Stage 1: the Java game (LionEngine Android backend) draws every frame with a hardware Canvas into a
- * Surface backed by a SurfaceTexture. This thread owns the GL context and the OpenXR session: it latches
- * the newest game frame (ASurfaceTexture_updateTexImage), copies it into a quad-layer swapchain (the
- * virtual screen) and polls the Touch controllers, which are handed back to Java as a gamepad.
+ * The Java game (LionEngine Android backend) draws every frame with a hardware Canvas into a Surface backed
+ * by a SurfaceTexture. Each frame is an atlas of 640x480 cells: the engine frame buffer (playfield, or the
+ * whole picture in menus) and, in levels, one cell per stereo layer (background components, front
+ * foreground, HUD), see StereoRouter.java. This thread owns the GL context and the OpenXR session: it latches
+ * the newest atlas, renders every layer per eye as a plane at its own depth (each plane subtends the same
+ * angle as the original screen, so the centre view matches the 2D game), and polls the Touch controllers,
+ * which are handed back to Java as a gamepad.
  *
  * OpenXR lifecycle follows QuakeQuest's TBXR_Common.c (loader init, EGL context, session, swapchains).
  *
@@ -13,6 +16,7 @@
 #include <jni.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -56,6 +60,16 @@ enum {
     BTN_MENU = 1 << 8, BTN_LSTICK = 1 << 9, BTN_RSTICK = 1 << 10
 };
 
+/* Atlas layout, keep in sync with StereoRouter.java / StereoLayers.java. */
+#define CELL_W 640
+#define CELL_H 480
+#define ATLAS_COLS 2
+#define LAYER_BG_COUNT 3
+#define LAYER_PLAYFIELD 4
+#define LAYER_FOREGROUND 5
+#define LAYER_HUD 6
+#define MESH_ROWS 32
+
 typedef struct {
     XrSwapchain handle;
     int32_t width, height;
@@ -65,8 +79,17 @@ typedef struct {
 } Swapchain;
 
 typedef struct {
+    int64_t time;
+    int mask, kinds, w, h;
+} FrameInfo;
+
+#define INFO_RING 32
+
+typedef struct {
     /* config (vr.cfg) */
     float screen_distance, screen_width, screen_y;
+    float depth_sky, depth_bg_near, floor_top, floor_bottom, depth_fg, depth_hud;
+    float stereo;
     float bg_r, bg_g, bg_b;
 
     /* java */
@@ -76,7 +99,14 @@ typedef struct {
     jclass bridge;
     jmethodID on_input;
     ASurfaceTexture *surface_texture;
-    int game_w, game_h;
+    int atlas_w, atlas_h;
+
+    /* frame infos posted by Java */
+    pthread_mutex_t info_lock;
+    FrameInfo ring[INFO_RING];
+    int ring_next;
+    FrameInfo current;
+    bool have_frame;
 
     /* thread */
     pthread_t thread;
@@ -88,8 +118,10 @@ typedef struct {
     EGLContext context;
     EGLSurface pbuffer;
     GLuint game_tex;
-    GLuint prog, prog_u_tex, prog_u_mat;
+    GLuint prog;
+    GLint u_mvp, u_screen, u_disp, u_tex, u_st, u_cell, u_atlas, u_linearize;
     GLuint vao, vbo;
+    float st_matrix[16];
     bool srgb;
 
     /* openxr */
@@ -102,17 +134,15 @@ typedef struct {
     XrViewConfigurationView view_cfg[2];
     XrView views[2];
     Swapchain eye[2];
-    Swapchain screen;
-    bool screen_has_image;
 
     /* input */
     XrActionSet action_set;
     XrAction a_a, a_b, a_x, a_y, a_menu, a_lclick, a_rclick;
     XrAction a_ltrig, a_rtrig, a_lgrip, a_rgrip;
     XrAction a_lx, a_ly, a_rx, a_ry, a_lstick, a_rstick;
-    XrPath left_hand, right_hand;
     uint32_t buttons;
     int frame_count;
+    int last_logged_mask;
 } App;
 
 static App g;
@@ -124,6 +154,13 @@ static void load_config(const char *dir)
     g.screen_distance = 2.2f;
     g.screen_width = 2.6f;
     g.screen_y = 0.0f;
+    g.depth_sky = 40.0f;
+    g.depth_bg_near = 7.0f;
+    g.floor_top = 14.0f;
+    g.floor_bottom = 2.5f;
+    g.depth_fg = 1.95f;
+    g.depth_hud = 1.8f;
+    g.stereo = 1.0f;
     g.bg_r = 0.02f;
     g.bg_g = 0.02f;
     g.bg_b = 0.03f;
@@ -135,17 +172,83 @@ static void load_config(const char *dir)
         LOGI("no %s, using defaults", path);
         return;
     }
+    static const struct {
+        const char *key;
+        size_t offset;
+    } keys[] = {
+        {"screen_distance", offsetof(App, screen_distance)}, {"screen_width", offsetof(App, screen_width)},
+        {"screen_y", offsetof(App, screen_y)},               {"depth_sky", offsetof(App, depth_sky)},
+        {"depth_bg_near", offsetof(App, depth_bg_near)},     {"floor_top", offsetof(App, floor_top)},
+        {"floor_bottom", offsetof(App, floor_bottom)},       {"depth_fg", offsetof(App, depth_fg)},
+        {"depth_hud", offsetof(App, depth_hud)},             {"stereo", offsetof(App, stereo)},
+    };
     char line[256];
     while (fgets(line, sizeof(line), f)) {
         char key[64];
         float v;
         if (line[0] == '#' || sscanf(line, " %63[^= ] = %f", key, &v) != 2) continue;
-        if (!strcmp(key, "screen_distance")) g.screen_distance = v;
-        else if (!strcmp(key, "screen_width")) g.screen_width = v;
-        else if (!strcmp(key, "screen_y")) g.screen_y = v;
-        LOGI("cfg %s = %f", key, v);
+        for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+            if (!strcmp(key, keys[i].key)) {
+                *(float *) ((char *) &g + keys[i].offset) = v;
+                LOGI("cfg %s = %f", key, v);
+            }
+        }
     }
     fclose(f);
+}
+
+/* ---------------------------------------------------------------- math */
+
+typedef struct {
+    float m[16]; /* column major */
+} Mat4;
+
+static Mat4 mat_mul(const Mat4 *a, const Mat4 *b)
+{
+    Mat4 r;
+    for (int c = 0; c < 4; c++)
+        for (int rr = 0; rr < 4; rr++) {
+            float s = 0;
+            for (int k = 0; k < 4; k++) s += a->m[k * 4 + rr] * b->m[c * 4 + k];
+            r.m[c * 4 + rr] = s;
+        }
+    return r;
+}
+
+static Mat4 mat_projection(XrFovf fov, float nearz, float farz)
+{
+    const float l = tanf(fov.angleLeft), r = tanf(fov.angleRight);
+    const float d = tanf(fov.angleDown), u = tanf(fov.angleUp);
+    Mat4 m;
+    memset(&m, 0, sizeof(m));
+    m.m[0] = 2.0f / (r - l);
+    m.m[5] = 2.0f / (u - d);
+    m.m[8] = (r + l) / (r - l);
+    m.m[9] = (u + d) / (u - d);
+    m.m[10] = -(farz + nearz) / (farz - nearz);
+    m.m[11] = -1.0f;
+    m.m[14] = -2.0f * farz * nearz / (farz - nearz);
+    return m;
+}
+
+/* Inverse of the rigid pose transform (world -> eye). */
+static Mat4 mat_view(XrPosef p)
+{
+    const float x = p.orientation.x, y = p.orientation.y, z = p.orientation.z, w = p.orientation.w;
+    /* Rotation matrix, element (row, col) stored at r[row * 3 + col]. */
+    const float r[9] = {1 - 2 * (y * y + z * z), 2 * (x * y - z * w),     2 * (x * z + y * w),
+                        2 * (x * y + z * w),     1 - 2 * (x * x + z * z), 2 * (y * z - x * w),
+                        2 * (x * z - y * w),     2 * (y * z + x * w),     1 - 2 * (x * x + y * y)};
+    Mat4 m;
+    memset(&m, 0, sizeof(m));
+    /* Upper 3x3 = R^T: element (row, col) = R(col, row); column-major index col * 4 + row. */
+    for (int row = 0; row < 3; row++)
+        for (int col = 0; col < 3; col++) m.m[col * 4 + row] = r[col * 3 + row];
+    const float tx = p.position.x, ty = p.position.y, tz = p.position.z;
+    for (int row = 0; row < 3; row++)
+        m.m[12 + row] = -(m.m[0 + row] * tx + m.m[4 + row] * ty + m.m[8 + row] * tz);
+    m.m[15] = 1.0f;
+    return m;
 }
 
 /* ---------------------------------------------------------------- GL */
@@ -165,33 +268,46 @@ static GLuint compile(GLenum type, const char *src)
     return s;
 }
 
+/* A layer plane: grid in (u, v) with v = 0 at the top. Its position keeps the angle of the original screen
+ * point seen from the origin, pushed out to the layer depth (1/depth interpolated from top to bottom). */
 static const char *VS =
     "#version 300 es\n"
-    "layout(location = 0) in vec2 aPos;\n"
-    "uniform mat4 uMat;\n"
+    "layout(location = 0) in vec2 aUv;\n"
+    "uniform mat4 uMvp;\n"
+    "uniform vec4 uScreen;\n" /* width, height, distance, centre y */
+    "uniform vec2 uDisp;\n"   /* 1/depth at top, 1/depth at bottom */
     "out vec2 vUv;\n"
     "void main() {\n"
-    "    vec2 uv = aPos * 0.5 + 0.5;\n"
-    "    vUv = (uMat * vec4(uv, 0.0, 1.0)).xy;\n"
-    "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
+    "    float depth = 1.0 / mix(uDisp.x, uDisp.y, aUv.y);\n"
+    "    vec3 p = vec3((aUv.x - 0.5) * uScreen.x, uScreen.w + (0.5 - aUv.y) * uScreen.y, -uScreen.z);\n"
+    "    vUv = aUv;\n"
+    "    gl_Position = uMvp * vec4(p * (depth / uScreen.z), 1.0);\n"
     "}\n";
 
-/* The game draws sRGB values; the swapchain is sRGB, so decode here and let the hardware re-encode. */
+/* Sharp bilinear sampling of the pixel art inside the cell, premultiplied alpha output. */
 static const char *FS =
     "#version 300 es\n"
     "#extension GL_OES_EGL_image_external_essl3 : require\n"
-    "precision mediump float;\n"
+    "precision highp float;\n"
     "uniform samplerExternalOES uTex;\n"
+    "uniform mat4 uSt;\n"
+    "uniform vec4 uCell;\n" /* cell x, y (atlas px, top-left origin), content width, height */
+    "uniform vec2 uAtlas;\n"
     "uniform float uLinearize;\n"
     "in vec2 vUv;\n"
     "out vec4 oColor;\n"
     "void main() {\n"
-    "    vec4 c = texture(uTex, vUv);\n"
-    "    vec3 lin = pow(c.rgb, vec3(2.2));\n"
-    "    oColor = vec4(mix(c.rgb, lin, uLinearize), 1.0);\n"
+    "    vec2 px = vUv * uCell.zw;\n"
+    "    vec2 fw = max(fwidth(px), vec2(1e-4));\n"
+    "    vec2 p = floor(px) + 0.5 + clamp((fract(px) - 0.5) / fw, -0.5, 0.5);\n"
+    "    p = clamp(p, vec2(0.5), uCell.zw - 0.5);\n"
+    "    vec2 a = (uCell.xy + p) / uAtlas;\n"
+    "    a.y = 1.0 - a.y;\n"
+    "    vec4 c = texture(uTex, (uSt * vec4(a, 0.0, 1.0)).xy);\n"
+    "    vec3 rgb = c.a > 0.0 ? c.rgb / c.a : vec3(0.0);\n"
+    "    rgb = mix(rgb, pow(rgb, vec3(2.2)), uLinearize);\n"
+    "    oColor = vec4(rgb * c.a, c.a);\n"
     "}\n";
-
-static GLint g_u_linearize;
 
 static bool gl_init(void)
 {
@@ -218,8 +334,8 @@ static bool gl_init(void)
 
     glGenTextures(1, &g.game_tex);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, g.game_tex);
-    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     int r = ASurfaceTexture_attachToGLContext(g.surface_texture, g.game_tex);
@@ -235,19 +351,34 @@ static bool gl_init(void)
     GLint ok = 0;
     glGetProgramiv(g.prog, GL_LINK_STATUS, &ok);
     if (!ok) {
-        LOGE("program link failed");
+        char log[1024];
+        glGetProgramInfoLog(g.prog, sizeof(log), NULL, log);
+        LOGE("program link failed: %s", log);
         return false;
     }
-    g.prog_u_tex = glGetUniformLocation(g.prog, "uTex");
-    g.prog_u_mat = glGetUniformLocation(g.prog, "uMat");
-    g_u_linearize = glGetUniformLocation(g.prog, "uLinearize");
+    g.u_mvp = glGetUniformLocation(g.prog, "uMvp");
+    g.u_screen = glGetUniformLocation(g.prog, "uScreen");
+    g.u_disp = glGetUniformLocation(g.prog, "uDisp");
+    g.u_tex = glGetUniformLocation(g.prog, "uTex");
+    g.u_st = glGetUniformLocation(g.prog, "uSt");
+    g.u_cell = glGetUniformLocation(g.prog, "uCell");
+    g.u_atlas = glGetUniformLocation(g.prog, "uAtlas");
+    g.u_linearize = glGetUniformLocation(g.prog, "uLinearize");
 
-    static const float quad[] = {-1, -1, 1, -1, -1, 1, 1, 1};
+    /* Triangle strip, two columns, MESH_ROWS rows. */
+    float mesh[(MESH_ROWS + 1) * 4];
+    for (int i = 0; i <= MESH_ROWS; i++) {
+        const float v = (float) i / MESH_ROWS;
+        mesh[i * 4 + 0] = 0.0f;
+        mesh[i * 4 + 1] = v;
+        mesh[i * 4 + 2] = 1.0f;
+        mesh[i * 4 + 3] = v;
+    }
     glGenVertexArrays(1, &g.vao);
     glBindVertexArray(g.vao);
     glGenBuffers(1, &g.vbo);
     glBindBuffer(GL_ARRAY_BUFFER, g.vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(mesh), mesh, GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
     glBindVertexArray(0);
@@ -380,7 +511,7 @@ static bool xr_init(void)
     XrInstanceCreateInfo ci = {XR_TYPE_INSTANCE_CREATE_INFO};
     ci.next = &ia;
     strcpy(ci.applicationInfo.applicationName, "Lionheart VR");
-    ci.applicationInfo.applicationVersion = 1;
+    ci.applicationInfo.applicationVersion = 2;
     strcpy(ci.applicationInfo.engineName, "LionEngine");
     ci.applicationInfo.engineVersion = 11;
     ci.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 34);
@@ -432,15 +563,14 @@ static bool xr_init(void)
     }
     free(formats);
     g.srgb = format == GL_SRGB8_ALPHA8;
-    LOGI("swapchain format 0x%llx (srgb=%d), eye %ux%u", (long long) format, g.srgb,
-         g.view_cfg[0].recommendedImageRectWidth, g.view_cfg[0].recommendedImageRectHeight);
+    const int ew = (int) g.view_cfg[0].recommendedImageRectWidth;
+    const int eh = (int) g.view_cfg[0].recommendedImageRectHeight;
+    LOGI("swapchain format 0x%llx (srgb=%d), eye %dx%d", (long long) format, g.srgb, ew, eh);
 
     for (int i = 0; i < 2; i++) {
-        /* The projection layer only carries the dark backdrop in stage 1, so it can stay small. */
-        if (!create_swapchain(&g.eye[i], 512, 512, format)) return false;
+        if (!create_swapchain(&g.eye[i], ew, eh, format)) return false;
         g.views[i].type = XR_TYPE_VIEW;
     }
-    if (!create_swapchain(&g.screen, g.game_w, g.game_h, format)) return false;
     return input_init();
 }
 
@@ -455,7 +585,7 @@ static void java_finish(void)
     (*g.env)->DeleteLocalRef(g.env, cls);
 }
 
-/* ---------------------------------------------------------------- frame loop */
+/* ---------------------------------------------------------------- input */
 
 static float get_float(XrAction a)
 {
@@ -576,6 +706,89 @@ static void handle_events(void)
     }
 }
 
+/* ---------------------------------------------------------------- frame */
+
+static void latch_game_frame(void)
+{
+    if (ASurfaceTexture_updateTexImage(g.surface_texture) != 0) return;
+    ASurfaceTexture_getTransformMatrix(g.surface_texture, g.st_matrix);
+    const int64_t ts = ASurfaceTexture_getTimestamp(g.surface_texture);
+
+    /* Newest info posted before the buffer was queued. */
+    pthread_mutex_lock(&g.info_lock);
+    const FrameInfo *best = NULL;
+    for (int i = 0; i < INFO_RING; i++) {
+        const FrameInfo *f = &g.ring[i];
+        if (f->time == 0 || f->time > ts) continue;
+        if (!best || f->time > best->time) best = f;
+    }
+    if (best && best->mask && best->w > 0 && best->h > 0) {
+        g.current = *best;
+        g.have_frame = true;
+    }
+    pthread_mutex_unlock(&g.info_lock);
+
+    if (g.have_frame && g.current.mask != g.last_logged_mask) {
+        g.last_logged_mask = g.current.mask;
+        LOGI("layers mask 0x%x kinds 0x%x content %dx%d", g.current.mask, g.current.kinds, g.current.w,
+             g.current.h);
+    }
+}
+
+static void layer_disparity(int id, float *top, float *bottom)
+{
+    const float screen = 1.0f / g.screen_distance;
+    *top = *bottom = screen;
+    if (g.stereo < 0.5f) return;
+    if (id < LAYER_BG_COUNT) {
+        int count = 0;
+        for (int i = 0; i < LAYER_BG_COUNT; i++)
+            if (g.current.mask & (1 << i)) count = i + 1;
+        const float t = count > 1 ? (float) id / (float) (count - 1) : 0.0f;
+        const float d = (1.0f - t) / g.depth_sky + t / g.depth_bg_near;
+        *top = *bottom = d;
+        if (g.current.kinds & (1 << id)) {
+            *top = 1.0f / g.floor_top;
+            *bottom = 1.0f / g.floor_bottom;
+        }
+    } else if (id == LAYER_FOREGROUND) {
+        *top = *bottom = 1.0f / g.depth_fg;
+    } else if (id == LAYER_HUD) {
+        *top = *bottom = 1.0f / g.depth_hud;
+    }
+}
+
+static void draw_layers(const Mat4 *mvp)
+{
+    const float sw = g.screen_width;
+    const float sh = sw * (float) g.current.h / (float) g.current.w;
+
+    glUseProgram(g.prog);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, g.game_tex);
+    glUniform1i(g.u_tex, 0);
+    glUniformMatrix4fv(g.u_st, 1, GL_FALSE, g.st_matrix);
+    glUniformMatrix4fv(g.u_mvp, 1, GL_FALSE, mvp->m);
+    glUniform4f(g.u_screen, sw, sh, g.screen_distance, g.screen_y);
+    glUniform2f(g.u_atlas, (float) g.atlas_w, (float) g.atlas_h);
+    glUniform1f(g.u_linearize, g.srgb ? 1.0f : 0.0f);
+    glBindVertexArray(g.vao);
+
+    /* Far to near. */
+    static const int order[] = {0, 1, 2, LAYER_PLAYFIELD, LAYER_FOREGROUND, LAYER_HUD};
+    for (size_t i = 0; i < sizeof(order) / sizeof(order[0]); i++) {
+        const int id = order[i];
+        if (!(g.current.mask & (1 << id))) continue;
+        float top, bottom;
+        layer_disparity(id, &top, &bottom);
+        glUniform2f(g.u_disp, top, bottom);
+        glUniform4f(g.u_cell, (float) (id % ATLAS_COLS * CELL_W), (float) (id / ATLAS_COLS * CELL_H),
+                    (float) g.current.w, (float) g.current.h);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, (MESH_ROWS + 1) * 2);
+    }
+    glBindVertexArray(0);
+}
+
 static uint32_t acquire(Swapchain *sc)
 {
     uint32_t idx = 0;
@@ -596,28 +809,6 @@ static void release(Swapchain *sc)
     xrReleaseSwapchainImage(sc->handle, &ri);
 }
 
-static void draw_screen(void)
-{
-    ASurfaceTexture_updateTexImage(g.surface_texture);
-    float m[16];
-    ASurfaceTexture_getTransformMatrix(g.surface_texture, m);
-
-    acquire(&g.screen);
-    glDisable(GL_BLEND);
-    glDisable(GL_DEPTH_TEST);
-    glUseProgram(g.prog);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_EXTERNAL_OES, g.game_tex);
-    glUniform1i(g.prog_u_tex, 0);
-    glUniformMatrix4fv(g.prog_u_mat, 1, GL_FALSE, m);
-    glUniform1f(g_u_linearize, g.srgb ? 1.0f : 0.0f);
-    glBindVertexArray(g.vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glBindVertexArray(0);
-    release(&g.screen);
-    g.screen_has_image = true;
-}
-
 static void render_frame(void)
 {
     XrFrameWaitInfo wi = {XR_TYPE_FRAME_WAIT_INFO};
@@ -626,13 +817,14 @@ static void render_frame(void)
     XrFrameBeginInfo bi = {XR_TYPE_FRAME_BEGIN_INFO};
     if (XR_FAILED(xrBeginFrame(g.session, &bi))) return;
 
-    const XrCompositionLayerBaseHeader *layers[2];
+    const XrCompositionLayerBaseHeader *layers[1];
     uint32_t layer_count = 0;
     XrCompositionLayerProjection proj = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     XrCompositionLayerProjectionView pv[2];
-    XrCompositionLayerQuad quad = {XR_TYPE_COMPOSITION_LAYER_QUAD};
 
     if (fs.shouldRender) {
+        latch_game_frame();
+
         XrViewLocateInfo li = {XR_TYPE_VIEW_LOCATE_INFO};
         li.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
         li.displayTime = fs.predictedDisplayTime;
@@ -641,10 +833,21 @@ static void render_frame(void)
         uint32_t nv = 0;
         xrLocateViews(g.session, &li, &vs, 2, &nv, g.views);
 
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
         for (int i = 0; i < 2; i++) {
             acquire(&g.eye[i]);
             glClearColor(g.bg_r, g.bg_g, g.bg_b, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
+            if (g.have_frame) {
+                const Mat4 p = mat_projection(g.views[i].fov, 0.05f, 200.0f);
+                const Mat4 v = mat_view(g.views[i].pose);
+                const Mat4 mvp = mat_mul(&p, &v);
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+                draw_layers(&mvp);
+                glDisable(GL_BLEND);
+            }
             release(&g.eye[i]);
             memset(&pv[i], 0, sizeof(pv[i]));
             pv[i].type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
@@ -658,20 +861,6 @@ static void render_frame(void)
         proj.viewCount = 2;
         proj.views = pv;
         layers[layer_count++] = (const XrCompositionLayerBaseHeader *) &proj;
-
-        draw_screen();
-        quad.space = g.local_space;
-        quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-        quad.subImage.swapchain = g.screen.handle;
-        quad.subImage.imageRect.extent.width = g.screen.width;
-        quad.subImage.imageRect.extent.height = g.screen.height;
-        quad.pose.orientation.w = 1.0f;
-        quad.pose.position.x = 0.0f;
-        quad.pose.position.y = g.screen_y;
-        quad.pose.position.z = -g.screen_distance;
-        quad.size.width = g.screen_width;
-        quad.size.height = g.screen_width * (float) g.game_h / (float) g.game_w;
-        if (g.screen_has_image) layers[layer_count++] = (const XrCompositionLayerBaseHeader *) &quad;
     }
 
     XrFrameEndInfo ei = {XR_TYPE_FRAME_END_INFO};
@@ -694,7 +883,7 @@ static void *xr_thread(void *arg)
         (*g.vm)->DetachCurrentThread(g.vm);
         return NULL;
     }
-    LOGI("OpenXR ready, game surface %dx%d", g.game_w, g.game_h);
+    LOGI("OpenXR ready, atlas %dx%d, stereo %.0f", g.atlas_w, g.atlas_h, g.stereo);
     while (g.running) {
         handle_events();
         if (!g.session_running) {
@@ -720,6 +909,7 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved)
 {
     (void) reserved;
     g.vm = vm;
+    pthread_mutex_init(&g.info_lock, NULL);
     return JNI_VERSION_1_6;
 }
 
@@ -732,13 +922,29 @@ JNIEXPORT void JNICALL Java_com_b3dgs_lionheart_quest_XrBridge_nativeStart(JNIEn
     g.bridge = (jclass) (*env)->NewGlobalRef(env, cls);
     g.on_input = (*env)->GetStaticMethodID(env, cls, "onInput", "(IFFFF)V");
     g.surface_texture = ASurfaceTexture_fromSurfaceTexture(env, surface_texture);
-    g.game_w = w;
-    g.game_h = h;
+    g.atlas_w = w;
+    g.atlas_h = h;
     const char *dir = files_dir ? (*env)->GetStringUTFChars(env, files_dir, NULL) : NULL;
     load_config(dir);
     if (dir) (*env)->ReleaseStringUTFChars(env, files_dir, dir);
     g.running = true;
     pthread_create(&g.thread, NULL, xr_thread, NULL);
+}
+
+JNIEXPORT void JNICALL Java_com_b3dgs_lionheart_quest_XrBridge_nativeFrameInfo(JNIEnv *env, jclass cls, jlong time,
+                                                                              jint mask, jint kinds, jint w, jint h)
+{
+    (void) env;
+    (void) cls;
+    pthread_mutex_lock(&g.info_lock);
+    FrameInfo *f = &g.ring[g.ring_next];
+    f->time = time;
+    f->mask = mask;
+    f->kinds = kinds;
+    f->w = w;
+    f->h = h;
+    g.ring_next = (g.ring_next + 1) % INFO_RING;
+    pthread_mutex_unlock(&g.info_lock);
 }
 
 JNIEXPORT void JNICALL Java_com_b3dgs_lionheart_quest_XrBridge_nativeStop(JNIEnv *env, jclass cls)

@@ -29,7 +29,7 @@ import com.b3dgs.lionheart.constant.Folder;
 /**
  * Gradient color background implementation.
  */
-final class Gradient extends BackgroundAbstract
+final class Gradient extends BackgroundStereo
 {
     private static final int OFFSET_Y = 82;
 

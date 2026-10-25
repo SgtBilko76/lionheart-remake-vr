@@ -26,7 +26,7 @@ import com.b3dgs.lionheart.constant.Folder;
 /**
  * Dragonfly full background implementation.
  */
-final class Dragonfly extends BackgroundAbstract
+final class Dragonfly extends BackgroundStereo
 {
     private static final int HEIGHT_MAX = 400;
     private static final int HEIGHT_TOTAL = 160;

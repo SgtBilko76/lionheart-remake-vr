@@ -34,7 +34,7 @@ import com.b3dgs.lionheart.constant.Folder;
 /**
  * Lava background implementation.
  */
-final class Lava extends BackgroundAbstract
+final class Lava extends BackgroundStereo
 {
     private static final int HEIGHT_MAX = 338;
     private static final int HEIGHT_TOTAL = 85;

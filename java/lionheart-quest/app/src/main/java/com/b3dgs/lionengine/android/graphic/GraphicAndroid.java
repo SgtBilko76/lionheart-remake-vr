@@ -126,9 +126,40 @@ final class GraphicAndroid implements Graphic
         g.drawBitmap(surface, x, y, paint);
     }
 
+    /** Quest port: when set, the scaled frame blit is captured instead of drawn (VR atlas composition). */
+    private ImageSurface captured;
+    private boolean capture;
+
+    /**
+     * Quest port: enable frame capture mode.
+     *
+     * @param capture <code>true</code> to capture the scaled blit.
+     */
+    void setCapture(boolean capture)
+    {
+        this.capture = capture;
+    }
+
+    /**
+     * Quest port: get and clear the captured frame.
+     *
+     * @return The captured image, <code>null</code> if none.
+     */
+    ImageSurface takeCaptured()
+    {
+        final ImageSurface image = captured;
+        captured = null;
+        return image;
+    }
+
     @Override
     public void drawImage(ImageSurface image, Transform transform, int x, int y)
     {
+        if (capture)
+        {
+            captured = image;
+            return;
+        }
         scale.setScale((float) transform.getScaleX(), (float) transform.getScaleY());
 
         final Bitmap surface = image.getSurface();

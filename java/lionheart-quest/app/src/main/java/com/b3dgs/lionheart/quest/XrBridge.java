@@ -109,5 +109,21 @@ public final class XrBridge
                                            int height,
                                            String filesDir);
 
+    /**
+     * Describe the frame about to be posted (matched with the buffer timestamp on the native side).
+     *
+     * @param time The time before posting (System.nanoTime).
+     * @param mask The layers present.
+     * @param kinds The floor layers.
+     * @param width The content width of each cell.
+     * @param height The content height of each cell.
+     */
+    static void frameInfo(long time, int mask, int kinds, int width, int height)
+    {
+        nativeFrameInfo(time, mask, kinds, width, height);
+    }
+
+    private static native void nativeFrameInfo(long time, int mask, int kinds, int width, int height);
+
     private static native void nativeStop();
 }

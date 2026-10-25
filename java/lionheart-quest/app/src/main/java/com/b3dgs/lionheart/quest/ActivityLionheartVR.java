@@ -20,6 +20,7 @@ import com.b3dgs.lionheart.Constant;
 import com.b3dgs.lionheart.GameConfig;
 import com.b3dgs.lionheart.Loading;
 import com.b3dgs.lionheart.Settings;
+import com.b3dgs.lionheart.StereoLayers;
 
 import java.io.File;
 
@@ -30,7 +31,7 @@ import java.io.File;
 public final class ActivityLionheartVR extends ActivityGame
 {
     private static final String TAG = "LionheartVR";
-    /** Game frame size: 4x the original 320x240, so the compositor scales crisp pixel art down. */
+    /** Logical output size (4:3 like the original); the game adapts its source resolution to this aspect. */
     private static final int WIDTH = Constant.RESOLUTION.width() * 4;
     private static final int HEIGHT = Constant.RESOLUTION.height() * 4;
 
@@ -40,14 +41,23 @@ public final class ActivityLionheartVR extends ActivityGame
     @Override
     protected void start(Bundle bundle)
     {
+        // The surface carries an atlas: engine frame buffer + stereo layers, one 640x480 cell each.
         texture = new SurfaceTexture(false);
-        texture.setDefaultBufferSize(WIDTH, HEIGHT);
+        texture.setDefaultBufferSize(StereoRouter.ATLAS_W, StereoRouter.ATLAS_H);
         surface = new Surface(texture);
         ScreenAndroid.setVrSurface(surface, WIDTH, HEIGHT);
 
+        final StereoRouter router = new StereoRouter();
+        StereoLayers.setRouter(router);
+        ScreenAndroid.setVrCompositor(router);
+
         final File files = getExternalFilesDir(null);
-        XrBridge.start(this, texture, WIDTH, HEIGHT, files != null ? files.getAbsolutePath() : null);
-        Log.i(TAG, "VR host started, game surface " + WIDTH + "x" + HEIGHT);
+        XrBridge.start(this,
+                       texture,
+                       StereoRouter.ATLAS_W,
+                       StereoRouter.ATLAS_H,
+                       files != null ? files.getAbsolutePath() : null);
+        Log.i(TAG, "VR host started, atlas " + StereoRouter.ATLAS_W + "x" + StereoRouter.ATLAS_H);
 
         // Assets live under com/b3dgs/lionheart, not under the .quest package name.
         EngineAndroid.setResourcesPackage("com.b3dgs.lionheart");

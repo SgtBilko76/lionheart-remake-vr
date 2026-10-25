@@ -1687,7 +1687,9 @@ final class World extends WorldHelper implements MusicPlayer, LoadNextStage
             super.render(g);
 
             rasterRenderer.execute();
+            StereoLayers.layer(g, StereoLayers.FOREGROUND, StereoLayers.KIND_PLANE);
             landscape.renderForeground(g);
+            StereoLayers.layer(g, StereoLayers.HUD, StereoLayers.KIND_PLANE);
             hud.render(g);
 
             if (device.isFired(DeviceMapping.TAB))
@@ -1700,6 +1702,7 @@ final class World extends WorldHelper implements MusicPlayer, LoadNextStage
                 }
             }
             cheats.render(g);
+            StereoLayers.end(g);
         }
     }
 

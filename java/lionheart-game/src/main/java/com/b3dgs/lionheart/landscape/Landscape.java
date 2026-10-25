@@ -19,6 +19,7 @@ package com.b3dgs.lionheart.landscape;
 import com.b3dgs.lionengine.game.background.Background;
 import com.b3dgs.lionengine.game.feature.Camera;
 import com.b3dgs.lionengine.graphic.Graphic;
+import com.b3dgs.lionheart.StereoLayers;
 
 /**
  * Represents a landscape by containing a background and a foreground.
@@ -63,6 +64,7 @@ public class Landscape
     public void renderBackground(Graphic g)
     {
         background.render(g);
+        StereoLayers.layer(g, StereoLayers.PLAYFIELD, StereoLayers.KIND_PLANE);
         foreground.renderBack(g);
     }
 

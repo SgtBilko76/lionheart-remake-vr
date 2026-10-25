@@ -16,6 +16,7 @@
  */
 package com.b3dgs.lionengine.android.graphic;
 
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.os.Build;
 import android.view.Surface;
@@ -29,6 +30,7 @@ import com.b3dgs.lionengine.android.Gamepad;
 import com.b3dgs.lionengine.android.Mouse;
 import com.b3dgs.lionengine.android.VirtualDeviceButton;
 import com.b3dgs.lionengine.geom.Rectangle;
+import com.b3dgs.lionengine.graphic.ImageSurface;
 import com.b3dgs.lionengine.graphic.ScreenAbstract;
 
 import org.slf4j.Logger;
@@ -60,6 +62,37 @@ public final class ScreenAndroid extends ScreenAbstract implements SurfaceHolder
     private static volatile int vrWidth;
     /** Quest port: offscreen surface height. */
     private static volatile int vrHeight;
+    /** Quest port: atlas compositor. */
+    private static volatile VrCompositor compositor;
+
+    /**
+     * Quest port: compose the VR atlas from the engine frame buffer and the stereo layers.
+     */
+    public interface VrCompositor
+    {
+        /**
+         * Compose the frame.
+         *
+         * @param atlas The surface canvas.
+         * @param frame The engine frame buffer (source resolution), <code>null</code> if none this frame.
+         */
+        void compose(Canvas atlas, Bitmap frame);
+
+        /**
+         * Called right before the frame is posted.
+         */
+        void posted();
+    }
+
+    /**
+     * Quest port: set the atlas compositor.
+     *
+     * @param compositor The compositor.
+     */
+    public static void setVrCompositor(VrCompositor compositor)
+    {
+        ScreenAndroid.compositor = compositor;
+    }
 
     /**
      * Quest port: render into an offscreen surface (SurfaceTexture consumed by OpenXR) instead of the view.
@@ -170,6 +203,7 @@ public final class ScreenAndroid extends ScreenAbstract implements SurfaceHolder
             final Surface target = vrSurface;
             draw = target::lockHardwareCanvas;
             keyboard.setEnabled(false);
+            ((GraphicAndroid) graphics).setCapture(compositor != null);
             ready = true;
         }
         else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
@@ -211,6 +245,13 @@ public final class ScreenAndroid extends ScreenAbstract implements SurfaceHolder
         {
             if (canvas != null)
             {
+                final VrCompositor c = compositor;
+                if (c != null)
+                {
+                    final ImageSurface frame = ((GraphicAndroid) graphics).takeCaptured();
+                    c.compose(canvas, frame != null ? (Bitmap) frame.getSurface() : null);
+                    c.posted();
+                }
                 try
                 {
                     vrSurface.unlockCanvasAndPost(canvas);

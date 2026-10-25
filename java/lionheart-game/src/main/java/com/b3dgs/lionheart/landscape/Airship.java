@@ -33,7 +33,7 @@ import com.b3dgs.lionheart.landscape.Gradient.Backdrop;
 /**
  * Airship background implementation.
  */
-final class Airship extends BackgroundAbstract
+final class Airship extends BackgroundStereo
 {
     private static final int HEIGHT_MAX = 260;
     private static final int HEIGHT_TOTAL = 240;

@@ -34,7 +34,7 @@ import com.b3dgs.lionheart.constant.Folder;
 /**
  * Swamp background implementation.
  */
-final class Swamp extends BackgroundAbstract
+final class Swamp extends BackgroundStereo
 {
     private static final int HEIGHT_MAX = 338;
     private static final int HEIGHT_TOTAL = 82;
