@@ -69,6 +69,8 @@ enum {
 #define LAYER_FOREGROUND 5
 #define LAYER_HUD 6
 #define MESH_ROWS 32
+#define MESH_COLS 48
+#define MESH_INDICES (MESH_ROWS * MESH_COLS * 6)
 
 typedef struct {
     XrSwapchain handle;
@@ -91,6 +93,7 @@ typedef struct {
     float depth_sky, depth_bg_near, floor_top, floor_bottom, depth_fg, depth_hud;
     float stereo;
     float smooth, sharpen;
+    float curve;
     float bg_r, bg_g, bg_b;
 
     /* java */
@@ -129,7 +132,8 @@ typedef struct {
     GLint s_src, s_rect;
     GLuint up2_tex[8], up4_tex[8], up2_fbo[8], up4_fbo[8];
     int up_w[8], up_h[8];
-    GLuint vao, vbo;
+    GLuint vao, vbo, ibo;
+    GLint u_curve;
     float st_matrix[16];
     bool srgb;
 
@@ -188,6 +192,7 @@ static void load_config(const char *dir)
     g.stereo = 1.0f;
     g.smooth = 1.0f;
     g.sharpen = 0.5f;
+    g.curve = 1.0f;
     /* Pure black around the game (the swapchain is sRGB: 0.02 linear already shows as dark grey). */
     g.bg_r = 0.0f;
     g.bg_g = 0.0f;
@@ -212,6 +217,7 @@ static void load_config(const char *dir)
         {"floor_bottom", offsetof(App, floor_bottom)},       {"depth_fg", offsetof(App, depth_fg)},
         {"depth_hud", offsetof(App, depth_hud)},             {"stereo", offsetof(App, stereo)},
         {"smooth", offsetof(App, smooth)},                   {"sharpen", offsetof(App, sharpen)},
+        {"curve", offsetof(App, curve)},
     };
     char line[256];
     while (fgets(line, sizeof(line), f)) {
@@ -307,10 +313,16 @@ static const char *VS =
     "uniform mat4 uMvp;\n"
     "uniform vec4 uScreen;\n" /* width, height, distance, centre y */
     "uniform vec2 uDisp;\n"   /* 1/depth at top, 1/depth at bottom */
+    "uniform vec2 uCurve;\n"  /* cylinder radius (0 = flat), centre z */
     "out vec2 vUv;\n"
     "void main() {\n"
     "    float depth = 1.0 / mix(uDisp.x, uDisp.y, aUv.y);\n"
-    "    vec3 p = vec3((aUv.x - 0.5) * uScreen.x, uScreen.w + (0.5 - aUv.y) * uScreen.y, -uScreen.z);\n"
+    "    float y = uScreen.w + (0.5 - aUv.y) * uScreen.y;\n"
+    "    vec3 p = vec3((aUv.x - 0.5) * uScreen.x, y, -uScreen.z);\n"
+    "    if (uCurve.x > 0.0) {\n" /* bend around the viewer: arc length = screen width */
+    "        float th = (aUv.x - 0.5) * uScreen.x / uCurve.x;\n"
+    "        p = vec3(sin(th) * uCurve.x, y, uCurve.y - cos(th) * uCurve.x);\n"
+    "    }\n"
     "    vUv = aUv;\n"
     "    gl_Position = uMvp * vec4(p * (depth / uScreen.z), 1.0);\n"
     "}\n";
@@ -475,6 +487,7 @@ static bool gl_init(void)
     if (!g.prog || !g.copy_prog || !g.scale_prog) return false;
     g.u_mvp = glGetUniformLocation(g.prog, "uMvp");
     g.u_screen = glGetUniformLocation(g.prog, "uScreen");
+    g.u_curve = glGetUniformLocation(g.prog, "uCurve");
     g.u_disp = glGetUniformLocation(g.prog, "uDisp");
     g.u_tex = glGetUniformLocation(g.prog, "uTex");
     g.u_rect = glGetUniformLocation(g.prog, "uRect");
@@ -488,20 +501,31 @@ static bool gl_init(void)
     g.s_rect = glGetUniformLocation(g.scale_prog, "uRect");
     make_target(&g.atlas_tex, &g.atlas_fbo, g.atlas_w, g.atlas_h);
 
-    /* Triangle strip, two columns, MESH_ROWS rows. */
-    float mesh[(MESH_ROWS + 1) * 4];
-    for (int i = 0; i <= MESH_ROWS; i++) {
-        const float v = (float) i / MESH_ROWS;
-        mesh[i * 4 + 0] = 0.0f;
-        mesh[i * 4 + 1] = v;
-        mesh[i * 4 + 2] = 1.0f;
-        mesh[i * 4 + 3] = v;
-    }
+    /* Grid mesh (MESH_COLS x MESH_ROWS quads) so layers can bend into a curved screen. */
+    static float mesh[(MESH_ROWS + 1) * (MESH_COLS + 1) * 2];
+    static GLushort idx[MESH_INDICES];
+    for (int r = 0; r <= MESH_ROWS; r++)
+        for (int c = 0; c <= MESH_COLS; c++) {
+            const int i = r * (MESH_COLS + 1) + c;
+            mesh[i * 2 + 0] = (float) c / MESH_COLS;
+            mesh[i * 2 + 1] = (float) r / MESH_ROWS;
+        }
+    int k = 0;
+    for (int r = 0; r < MESH_ROWS; r++)
+        for (int c = 0; c < MESH_COLS; c++) {
+            const GLushort a = (GLushort) (r * (MESH_COLS + 1) + c), b = (GLushort) (a + 1);
+            const GLushort d = (GLushort) (a + MESH_COLS + 1), e = (GLushort) (d + 1);
+            idx[k++] = a; idx[k++] = d; idx[k++] = b;
+            idx[k++] = b; idx[k++] = d; idx[k++] = e;
+        }
     glGenVertexArrays(1, &g.vao);
     glBindVertexArray(g.vao);
     glGenBuffers(1, &g.vbo);
     glBindBuffer(GL_ARRAY_BUFFER, g.vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(mesh), mesh, GL_STATIC_DRAW);
+    glGenBuffers(1, &g.ibo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.ibo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(idx), idx, GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
     glBindVertexArray(0);
@@ -1019,6 +1043,13 @@ static void draw_layers(const Mat4 *mvp)
     glUniform1i(g.u_tex, 0);
     glUniformMatrix4fv(g.u_mvp, 1, GL_FALSE, mvp->m);
     glUniform4f(g.u_screen, sw, sh, g.screen_distance, g.screen_y);
+    /* curve 1 = cylinder centred on the head, 0.5 = twice the radius, 0 = flat. */
+    if (g.curve > 0.01f) {
+        const float radius = g.screen_distance / fminf(g.curve, 1.0f);
+        glUniform2f(g.u_curve, radius, radius - g.screen_distance);
+    } else {
+        glUniform2f(g.u_curve, 0.0f, 0.0f);
+    }
     glUniform1f(g.u_sharpen, g.sharpen);
     glUniform1f(g.u_linearize, g.srgb ? 1.0f : 0.0f);
     glBindVertexArray(g.vao);
@@ -1043,7 +1074,7 @@ static void draw_layers(const Mat4 *mvp)
                         (float) g.current.w, (float) g.current.h);
             glUniform2f(g.u_texsize, (float) g.atlas_w, (float) g.atlas_h);
         }
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, (MESH_ROWS + 1) * 2);
+        glDrawElements(GL_TRIANGLES, MESH_INDICES, GL_UNSIGNED_SHORT, 0);
     }
     glBindVertexArray(0);
 }
