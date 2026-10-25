@@ -1,0 +1,29 @@
+# Lionheart 3D - settings for the Meta Quest port.
+# Copy this file to the headset as
+#   /sdcard/Android/data/com.b3dgs.lionheart.quest/files/vr.cfg
+# and restart the game. Remove a line (or the whole file) to get the default back.
+
+# Virtual screen: distance (m), width (m), height offset (m, + = up)
+screen_distance = 2.2
+screen_width = 2.6
+screen_y = 0.0
+
+# Curved screen: 1 = curved around your head, 0.5 = gentler, 0 = flat
+curve = 1.0
+
+# 3D depth of the layers (m). The playfield always sits at screen_distance.
+# stereo = 0 shows everything flat at the screen distance.
+stereo = 1
+depth_sky = 40
+depth_bg_near = 7
+# Scrolling ground of the backgrounds: distance at its top and bottom edge
+floor_top = 14
+floor_bottom = 2.5
+# Water/lava in front of the playfield, and the HUD
+depth_fg = 1.95
+depth_hud = 1.8
+
+# Picture: smooth = 1 rounds the pixel-art edges (Scale2x x2), 0 = original sharp pixels
+smooth = 1
+# Sharpening strength, 0 = off, 0.5 = default, 1 = strong
+sharpen = 0.5
