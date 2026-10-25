@@ -161,9 +161,10 @@ static void load_config(const char *dir)
     g.depth_fg = 1.95f;
     g.depth_hud = 1.8f;
     g.stereo = 1.0f;
-    g.bg_r = 0.02f;
-    g.bg_g = 0.02f;
-    g.bg_b = 0.03f;
+    /* Pure black around the game (the swapchain is sRGB: 0.02 linear already shows as dark grey). */
+    g.bg_r = 0.0f;
+    g.bg_g = 0.0f;
+    g.bg_b = 0.0f;
     if (!dir) return;
     char path[512];
     snprintf(path, sizeof(path), "%s/vr.cfg", dir);
