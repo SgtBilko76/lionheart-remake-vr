@@ -97,6 +97,13 @@ public final class XrBridge
         }
         previous = buttons;
 
+        // Right stick only in levels: in menus it is easily nudged and moves the selection.
+        if (!StereoRouter.isScene())
+        {
+            rx = 0.0f;
+            ry = 0.0f;
+        }
+
         // Either stick moves; Android axis convention has y pointing down.
         final float x = Math.abs(lx) >= Math.abs(rx) ? lx : rx;
         final float y = Math.abs(ly) >= Math.abs(ry) ? ly : ry;

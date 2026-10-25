@@ -29,6 +29,19 @@ final class StereoRouter implements StereoLayers.Router, ScreenAndroid.VrComposi
     private static final int LAYERS = COLS * ROWS;
     private static final int PLAYFIELD_BIT = 1 << StereoLayers.PLAYFIELD;
 
+    /** True while a level (layered scene) is on screen, false in menus, intro and story pictures. */
+    private static volatile boolean scene;
+
+    /**
+     * Check if a level is on screen.
+     *
+     * @return <code>true</code> in a level, <code>false</code> in menus.
+     */
+    static boolean isScene()
+    {
+        return scene;
+    }
+
     private final Bitmap[] bitmaps = new Bitmap[LAYERS];
     private final Canvas[] canvases = new Canvas[LAYERS];
     private final Paint paint = new Paint();
@@ -134,6 +147,7 @@ final class StereoRouter implements StereoLayers.Router, ScreenAndroid.VrComposi
         final int layerKinds = doneKinds;
         doneMask = 0;
         doneKinds = 0;
+        scene = layers != 0;
 
         if (frame == null)
         {
