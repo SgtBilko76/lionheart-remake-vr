@@ -90,6 +90,7 @@ typedef struct {
     float screen_distance, screen_width, screen_y;
     float depth_sky, depth_bg_near, floor_top, floor_bottom, depth_fg, depth_hud;
     float stereo;
+    float smooth, sharpen;
     float bg_r, bg_g, bg_b;
 
     /* java */
@@ -119,7 +120,15 @@ typedef struct {
     EGLSurface pbuffer;
     GLuint game_tex;
     GLuint prog;
-    GLint u_mvp, u_screen, u_disp, u_tex, u_st, u_cell, u_atlas, u_linearize;
+    GLint u_mvp, u_screen, u_disp, u_tex, u_rect, u_texsize, u_sharpen, u_linearize;
+    /* pass 0: external game frame -> regular texture (row 0 = top) */
+    GLuint copy_prog, atlas_tex, atlas_fbo;
+    GLint c_tex, c_st, c_size;
+    /* Scale2x passes per layer: atlas cell -> 2x -> 4x */
+    GLuint scale_prog;
+    GLint s_src, s_rect;
+    GLuint up2_tex[8], up4_tex[8], up2_fbo[8], up4_fbo[8];
+    int up_w[8], up_h[8];
     GLuint vao, vbo;
     float st_matrix[16];
     bool srgb;
@@ -177,6 +186,8 @@ static void load_config(const char *dir)
     g.depth_fg = 1.95f;
     g.depth_hud = 1.8f;
     g.stereo = 1.0f;
+    g.smooth = 1.0f;
+    g.sharpen = 0.5f;
     /* Pure black around the game (the swapchain is sRGB: 0.02 linear already shows as dark grey). */
     g.bg_r = 0.0f;
     g.bg_g = 0.0f;
@@ -200,6 +211,7 @@ static void load_config(const char *dir)
         {"depth_bg_near", offsetof(App, depth_bg_near)},     {"floor_top", offsetof(App, floor_top)},
         {"floor_bottom", offsetof(App, floor_bottom)},       {"depth_fg", offsetof(App, depth_fg)},
         {"depth_hud", offsetof(App, depth_hud)},             {"stereo", offsetof(App, stereo)},
+        {"smooth", offsetof(App, smooth)},                   {"sharpen", offsetof(App, sharpen)},
     };
     char line[256];
     while (fgets(line, sizeof(line), f)) {
@@ -303,30 +315,124 @@ static const char *VS =
     "    gl_Position = uMvp * vec4(p * (depth / uScreen.z), 1.0);\n"
     "}\n";
 
-/* Sharp bilinear sampling of the pixel art inside the cell, premultiplied alpha output. */
+/* Eye pass: sharp bilinear sampling of a layer texture (premultiplied), optional unsharp mask at eye-pixel
+ * scale to counter the compositor's resampling blur. */
 static const char *FS =
+    "#version 300 es\n"
+    "precision highp float;\n"
+    "uniform sampler2D uTex;\n"
+    "uniform vec4 uRect;\n"     /* texel rect: x0, y0 (row 0 = top), width, height */
+    "uniform vec2 uTexSize;\n"
+    "uniform float uSharpen;\n"
+    "uniform float uLinearize;\n"
+    "in vec2 vUv;\n"
+    "out vec4 oColor;\n"
+    "vec4 sb(vec2 px, vec2 fw) {\n"
+    "    vec2 p = floor(px) + 0.5 + clamp((fract(px) - 0.5) / fw, -0.5, 0.5);\n"
+    "    p = clamp(p, vec2(0.5), uRect.zw - 0.5);\n"
+    "    return texture(uTex, (uRect.xy + p) / uTexSize);\n"
+    "}\n"
+    "void main() {\n"
+    "    vec2 px = vUv * uRect.zw;\n"
+    "    vec2 fw = max(fwidth(px), vec2(1e-4));\n"
+    "    vec4 c = sb(px, fw);\n"
+    "    if (c.a <= 0.0) { oColor = vec4(0.0); return; }\n"
+    "    if (uSharpen > 0.0) {\n"
+    "        vec4 n = sb(px + vec2(fw.x, 0.0), fw) + sb(px - vec2(fw.x, 0.0), fw)\n"
+    "               + sb(px + vec2(0.0, fw.y), fw) + sb(px - vec2(0.0, fw.y), fw);\n"
+    "        c.rgb = clamp(c.rgb + uSharpen * (c.rgb - 0.25 * n.rgb), vec3(0.0), vec3(c.a));\n"
+    "    }\n"
+    "    vec3 rgb = c.rgb / c.a;\n"
+    "    rgb = mix(rgb, pow(rgb, vec3(2.2)), uLinearize);\n"
+    "    oColor = vec4(rgb * c.a, c.a);\n"
+    "}\n";
+
+/* Full-screen triangle for the 2D passes. */
+static const char *VS_FULL =
+    "#version 300 es\n"
+    "void main() {\n"
+    "    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n"
+    "    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+    "}\n";
+
+/* Pass 0: copy the SurfaceTexture atlas into a regular texture, texel row 0 = top of the picture. */
+static const char *FS_COPY =
     "#version 300 es\n"
     "#extension GL_OES_EGL_image_external_essl3 : require\n"
     "precision highp float;\n"
     "uniform samplerExternalOES uTex;\n"
     "uniform mat4 uSt;\n"
-    "uniform vec4 uCell;\n" /* cell x, y (atlas px, top-left origin), content width, height */
-    "uniform vec2 uAtlas;\n"
-    "uniform float uLinearize;\n"
-    "in vec2 vUv;\n"
+    "uniform vec2 uSize;\n"
     "out vec4 oColor;\n"
     "void main() {\n"
-    "    vec2 px = vUv * uCell.zw;\n"
-    "    vec2 fw = max(fwidth(px), vec2(1e-4));\n"
-    "    vec2 p = floor(px) + 0.5 + clamp((fract(px) - 0.5) / fw, -0.5, 0.5);\n"
-    "    p = clamp(p, vec2(0.5), uCell.zw - 0.5);\n"
-    "    vec2 a = (uCell.xy + p) / uAtlas;\n"
-    "    a.y = 1.0 - a.y;\n"
-    "    vec4 c = texture(uTex, (uSt * vec4(a, 0.0, 1.0)).xy);\n"
-    "    vec3 rgb = c.a > 0.0 ? c.rgb / c.a : vec3(0.0);\n"
-    "    rgb = mix(rgb, pow(rgb, vec3(2.2)), uLinearize);\n"
-    "    oColor = vec4(rgb * c.a, c.a);\n"
+    "    vec2 uv = vec2(gl_FragCoord.x / uSize.x, 1.0 - gl_FragCoord.y / uSize.y);\n"
+    "    oColor = texture(uTex, (uSt * vec4(uv, 0.0, 1.0)).xy);\n"
     "}\n";
+
+/* Scale2x (EPX): edge-directed 2x pixel art scaler, copies pixels only (exact with transparency).
+ * Output texel row 0 = top, like the source. */
+static const char *FS_SCALE =
+    "#version 300 es\n"
+    "precision highp float;\n"
+    "precision highp int;\n"
+    "uniform highp sampler2D uSrc;\n"
+    "uniform ivec4 uRect;\n" /* source rect x0, y0, w, h */
+    "out vec4 oColor;\n"
+    "vec4 P(ivec2 s) { return texelFetch(uSrc, uRect.xy + clamp(s, ivec2(0), uRect.zw - 1), 0); }\n"
+    "bool eq(vec4 a, vec4 b) { return all(lessThan(abs(a - b), vec4(0.5 / 255.0))); }\n"
+    "void main() {\n"
+    "    ivec2 o = ivec2(gl_FragCoord.xy);\n"
+    "    ivec2 s = o / 2;\n"
+    "    ivec2 q = o - s * 2;\n"
+    "    vec4 E = P(s);\n"
+    "    vec4 B = P(s + ivec2(0, -1));\n"
+    "    vec4 D = P(s + ivec2(-1, 0));\n"
+    "    vec4 F = P(s + ivec2(1, 0));\n"
+    "    vec4 H = P(s + ivec2(0, 1));\n"
+    "    vec4 r = E;\n"
+    "    if (!eq(B, H) && !eq(D, F)) {\n"
+    "        if (q.y == 0) {\n"
+    "            if (q.x == 0) { if (eq(D, B)) r = D; } else { if (eq(B, F)) r = F; }\n"
+    "        } else {\n"
+    "            if (q.x == 0) { if (eq(D, H)) r = D; } else { if (eq(H, F)) r = F; }\n"
+    "        }\n"
+    "    }\n"
+    "    oColor = r;\n"
+    "}\n";
+
+static GLuint link_program(const char *vs, const char *fs, const char *name)
+{
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, compile(GL_VERTEX_SHADER, vs));
+    glAttachShader(prog, compile(GL_FRAGMENT_SHADER, fs));
+    glLinkProgram(prog);
+    GLint ok = 0;
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[1024];
+        glGetProgramInfoLog(prog, sizeof(log), NULL, log);
+        LOGE("program %s link failed: %s", name, log);
+        return 0;
+    }
+    return prog;
+}
+
+static void make_target(GLuint *tex, GLuint *fbo, int w, int h)
+{
+    if (!*tex) glGenTextures(1, tex);
+    glBindTexture(GL_TEXTURE_2D, *tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    if (!*fbo) glGenFramebuffers(1, fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, *fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, *tex, 0);
+    const GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (st != GL_FRAMEBUFFER_COMPLETE) LOGE("target fbo incomplete 0x%x (%dx%d)", st, w, h);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
 
 static bool gl_init(void)
 {
@@ -353,8 +459,8 @@ static bool gl_init(void)
 
     glGenTextures(1, &g.game_tex);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, g.game_tex);
-    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     int r = ASurfaceTexture_attachToGLContext(g.surface_texture, g.game_tex);
@@ -363,26 +469,24 @@ static bool gl_init(void)
         return false;
     }
 
-    g.prog = glCreateProgram();
-    glAttachShader(g.prog, compile(GL_VERTEX_SHADER, VS));
-    glAttachShader(g.prog, compile(GL_FRAGMENT_SHADER, FS));
-    glLinkProgram(g.prog);
-    GLint ok = 0;
-    glGetProgramiv(g.prog, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[1024];
-        glGetProgramInfoLog(g.prog, sizeof(log), NULL, log);
-        LOGE("program link failed: %s", log);
-        return false;
-    }
+    g.prog = link_program(VS, FS, "eye");
+    g.copy_prog = link_program(VS_FULL, FS_COPY, "copy");
+    g.scale_prog = link_program(VS_FULL, FS_SCALE, "scale2x");
+    if (!g.prog || !g.copy_prog || !g.scale_prog) return false;
     g.u_mvp = glGetUniformLocation(g.prog, "uMvp");
     g.u_screen = glGetUniformLocation(g.prog, "uScreen");
     g.u_disp = glGetUniformLocation(g.prog, "uDisp");
     g.u_tex = glGetUniformLocation(g.prog, "uTex");
-    g.u_st = glGetUniformLocation(g.prog, "uSt");
-    g.u_cell = glGetUniformLocation(g.prog, "uCell");
-    g.u_atlas = glGetUniformLocation(g.prog, "uAtlas");
+    g.u_rect = glGetUniformLocation(g.prog, "uRect");
+    g.u_texsize = glGetUniformLocation(g.prog, "uTexSize");
+    g.u_sharpen = glGetUniformLocation(g.prog, "uSharpen");
     g.u_linearize = glGetUniformLocation(g.prog, "uLinearize");
+    g.c_tex = glGetUniformLocation(g.copy_prog, "uTex");
+    g.c_st = glGetUniformLocation(g.copy_prog, "uSt");
+    g.c_size = glGetUniformLocation(g.copy_prog, "uSize");
+    g.s_src = glGetUniformLocation(g.scale_prog, "uSrc");
+    g.s_rect = glGetUniformLocation(g.scale_prog, "uRect");
+    make_target(&g.atlas_tex, &g.atlas_fbo, g.atlas_w, g.atlas_h);
 
     /* Triangle strip, two columns, MESH_ROWS rows. */
     float mesh[(MESH_ROWS + 1) * 4];
@@ -543,7 +647,7 @@ static bool xr_init(void)
     ia.applicationActivity = g.activity;
     XrInstanceCreateInfo ci = {XR_TYPE_INSTANCE_CREATE_INFO};
     ci.next = &ia;
-    strcpy(ci.applicationInfo.applicationName, "Lionheart VR");
+    strcpy(ci.applicationInfo.applicationName, "Lionheart 3D");
     ci.applicationInfo.applicationVersion = 2;
     strcpy(ci.applicationInfo.engineName, "LionEngine");
     ci.applicationInfo.engineVersion = 11;
@@ -807,9 +911,9 @@ static void handle_events(void)
 
 /* ---------------------------------------------------------------- frame */
 
-static void latch_game_frame(void)
+static bool latch_game_frame(void)
 {
-    if (ASurfaceTexture_updateTexImage(g.surface_texture) != 0) return;
+    if (ASurfaceTexture_updateTexImage(g.surface_texture) != 0) return false;
     ASurfaceTexture_getTransformMatrix(g.surface_texture, g.st_matrix);
     const int64_t ts = ASurfaceTexture_getTimestamp(g.surface_texture);
 
@@ -832,6 +936,53 @@ static void latch_game_frame(void)
         LOGI("layers mask 0x%x kinds 0x%x content %dx%d", g.current.mask, g.current.kinds, g.current.w,
              g.current.h);
     }
+    return g.have_frame;
+}
+
+/* New game frame: copy the atlas, then Scale2x twice per present layer (4x, smoothed pixel art). */
+static void upscale_layers(void)
+{
+    glDisable(GL_BLEND);
+    glBindVertexArray(g.vao);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, g.atlas_fbo);
+    glViewport(0, 0, g.atlas_w, g.atlas_h);
+    glUseProgram(g.copy_prog);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, g.game_tex);
+    glUniform1i(g.c_tex, 0);
+    glUniformMatrix4fv(g.c_st, 1, GL_FALSE, g.st_matrix);
+    glUniform2f(g.c_size, (float) g.atlas_w, (float) g.atlas_h);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    if (g.smooth >= 0.5f) {
+        const int w = g.current.w, h = g.current.h;
+        glUseProgram(g.scale_prog);
+        glUniform1i(g.s_src, 0);
+        for (int id = 0; id < 8; id++) {
+            if (!(g.current.mask & (1 << id))) continue;
+            if (g.up_w[id] != w || g.up_h[id] != h) {
+                make_target(&g.up2_tex[id], &g.up2_fbo[id], w * 2, h * 2);
+                make_target(&g.up4_tex[id], &g.up4_fbo[id], w * 4, h * 4);
+                g.up_w[id] = w;
+                g.up_h[id] = h;
+                LOGI("layer %d upscale targets %dx%d", id, w * 4, h * 4);
+            }
+            glBindFramebuffer(GL_FRAMEBUFFER, g.up2_fbo[id]);
+            glViewport(0, 0, w * 2, h * 2);
+            glBindTexture(GL_TEXTURE_2D, g.atlas_tex);
+            glUniform4i(g.s_rect, id % ATLAS_COLS * CELL_W, id / ATLAS_COLS * CELL_H, w, h);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+
+            glBindFramebuffer(GL_FRAMEBUFFER, g.up4_fbo[id]);
+            glViewport(0, 0, w * 4, h * 4);
+            glBindTexture(GL_TEXTURE_2D, g.up2_tex[id]);
+            glUniform4i(g.s_rect, 0, 0, w * 2, h * 2);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+        }
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindVertexArray(0);
 }
 
 static void layer_disparity(int id, float *top, float *bottom)
@@ -862,14 +1013,13 @@ static void draw_layers(const Mat4 *mvp)
     const float sw = g.screen_width;
     const float sh = sw * (float) g.current.h / (float) g.current.w;
 
+    const bool smooth = g.smooth >= 0.5f;
     glUseProgram(g.prog);
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_EXTERNAL_OES, g.game_tex);
     glUniform1i(g.u_tex, 0);
-    glUniformMatrix4fv(g.u_st, 1, GL_FALSE, g.st_matrix);
     glUniformMatrix4fv(g.u_mvp, 1, GL_FALSE, mvp->m);
     glUniform4f(g.u_screen, sw, sh, g.screen_distance, g.screen_y);
-    glUniform2f(g.u_atlas, (float) g.atlas_w, (float) g.atlas_h);
+    glUniform1f(g.u_sharpen, g.sharpen);
     glUniform1f(g.u_linearize, g.srgb ? 1.0f : 0.0f);
     glBindVertexArray(g.vao);
 
@@ -882,8 +1032,17 @@ static void draw_layers(const Mat4 *mvp)
         float top, bottom;
         layer_disparity(id, &top, &bottom);
         glUniform2f(g.u_disp, top, bottom);
-        glUniform4f(g.u_cell, (float) (id % ATLAS_COLS * CELL_W), (float) (id / ATLAS_COLS * CELL_H),
-                    (float) g.current.w, (float) g.current.h);
+        if (smooth) {
+            const int w4 = g.current.w * 4, h4 = g.current.h * 4;
+            glBindTexture(GL_TEXTURE_2D, g.up4_tex[id]);
+            glUniform4f(g.u_rect, 0.0f, 0.0f, (float) w4, (float) h4);
+            glUniform2f(g.u_texsize, (float) w4, (float) h4);
+        } else {
+            glBindTexture(GL_TEXTURE_2D, g.atlas_tex);
+            glUniform4f(g.u_rect, (float) (id % ATLAS_COLS * CELL_W), (float) (id / ATLAS_COLS * CELL_H),
+                        (float) g.current.w, (float) g.current.h);
+            glUniform2f(g.u_texsize, (float) g.atlas_w, (float) g.atlas_h);
+        }
         glDrawArrays(GL_TRIANGLE_STRIP, 0, (MESH_ROWS + 1) * 2);
     }
     glBindVertexArray(0);
@@ -924,7 +1083,7 @@ static void render_frame(void)
     XrCompositionLayerProjectionView pv[2];
 
     if (fs.shouldRender) {
-        latch_game_frame();
+        if (latch_game_frame()) upscale_layers();
 
         XrViewLocateInfo li = {XR_TYPE_VIEW_LOCATE_INFO};
         li.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;

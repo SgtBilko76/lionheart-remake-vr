@@ -27,7 +27,7 @@
         android:hardwareAccelerated="true"
         android:icon="@drawable/ic_launcher"
         android:isGame="true"
-        android:label="Lionheart VR"
+        android:label="Lionheart 3D"
         android:largeHeap="true"
         android:extractNativeLibs="true"
         android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
