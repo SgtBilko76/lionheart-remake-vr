@@ -55,7 +55,8 @@ final class GraphicAndroid implements Graphic
     /** Linear gradient. */
     private LinearGradient linearGradient;
     /** Alpha. */
-    private int alpha;
+    /** Quest port fix: start opaque like GraphicAwt (0 made every plain drawImage invisible). */
+    private int alpha = 255;
 
     /**
      * Internal constructor.
