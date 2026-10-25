@@ -142,10 +142,26 @@ typedef struct {
     XrAction a_lx, a_ly, a_rx, a_ry, a_lstick, a_rstick;
     uint32_t buttons;
     int frame_count;
+
+    /* passthrough (XR_FB_passthrough), toggled with a left stick click */
+    bool pt_supported;
+    bool pt_on;
+    XrPassthroughFB pt;
+    XrPassthroughLayerFB pt_layer;
+    PFN_xrCreatePassthroughFB pfnCreatePassthrough;
+    PFN_xrPassthroughStartFB pfnPassthroughStart;
+    PFN_xrPassthroughPauseFB pfnPassthroughPause;
+    PFN_xrCreatePassthroughLayerFB pfnCreatePassthroughLayer;
+    PFN_xrPassthroughLayerResumeFB pfnPassthroughLayerResume;
+    PFN_xrPassthroughLayerPauseFB pfnPassthroughLayerPause;
+    char state_path[512];
     int last_logged_mask;
 } App;
 
 static App g;
+
+static void passthrough_init(void);
+static void passthrough_set(bool on);
 
 /* ---------------------------------------------------------------- config */
 
@@ -166,6 +182,8 @@ static void load_config(const char *dir)
     g.bg_g = 0.0f;
     g.bg_b = 0.0f;
     if (!dir) return;
+    snprintf(g.state_path, sizeof(g.state_path), "%s/passthrough.on", dir);
+    if (access(g.state_path, F_OK) == 0) g.pt_on = true;
     char path[512];
     snprintf(path, sizeof(path), "%s/vr.cfg", dir);
     FILE *f = fopen(path, "r");
@@ -505,7 +523,21 @@ static bool xr_init(void)
         init_loader((XrLoaderInitInfoBaseHeaderKHR *) &li);
     }
 
-    const char *exts[] = {XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME, XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME};
+    const char *exts[3] = {XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME, XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME,
+                           XR_FB_PASSTHROUGH_EXTENSION_NAME};
+    uint32_t ext_count = 2;
+    {
+        uint32_t n_ext = 0;
+        xrEnumerateInstanceExtensionProperties(NULL, 0, &n_ext, NULL);
+        XrExtensionProperties *props = calloc(n_ext, sizeof(XrExtensionProperties));
+        for (uint32_t i = 0; i < n_ext; i++) props[i].type = XR_TYPE_EXTENSION_PROPERTIES;
+        xrEnumerateInstanceExtensionProperties(NULL, n_ext, &n_ext, props);
+        for (uint32_t i = 0; i < n_ext; i++)
+            if (!strcmp(props[i].extensionName, XR_FB_PASSTHROUGH_EXTENSION_NAME)) g.pt_supported = true;
+        free(props);
+        if (g.pt_supported) ext_count = 3;
+        LOGI("XR_FB_passthrough %s", g.pt_supported ? "available" : "not available");
+    }
     XrInstanceCreateInfoAndroidKHR ia = {XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
     ia.applicationVM = g.vm;
     ia.applicationActivity = g.activity;
@@ -516,7 +548,7 @@ static bool xr_init(void)
     strcpy(ci.applicationInfo.engineName, "LionEngine");
     ci.applicationInfo.engineVersion = 11;
     ci.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 34);
-    ci.enabledExtensionCount = 2;
+    ci.enabledExtensionCount = ext_count;
     ci.enabledExtensionNames = exts;
     XR_CHECK(xrCreateInstance(&ci, &g.instance));
 
@@ -572,7 +604,69 @@ static bool xr_init(void)
         if (!create_swapchain(&g.eye[i], ew, eh, format)) return false;
         g.views[i].type = XR_TYPE_VIEW;
     }
+    passthrough_init();
     return input_init();
+}
+
+/* ---------------------------------------------------------------- passthrough */
+
+static void passthrough_init(void)
+{
+    if (!g.pt_supported) return;
+#define PT_FN(name, var) xrGetInstanceProcAddr(g.instance, name, (PFN_xrVoidFunction *) &g.var)
+    PT_FN("xrCreatePassthroughFB", pfnCreatePassthrough);
+    PT_FN("xrPassthroughStartFB", pfnPassthroughStart);
+    PT_FN("xrPassthroughPauseFB", pfnPassthroughPause);
+    PT_FN("xrCreatePassthroughLayerFB", pfnCreatePassthroughLayer);
+    PT_FN("xrPassthroughLayerResumeFB", pfnPassthroughLayerResume);
+    PT_FN("xrPassthroughLayerPauseFB", pfnPassthroughLayerPause);
+#undef PT_FN
+    if (!g.pfnCreatePassthrough || !g.pfnCreatePassthroughLayer) {
+        g.pt_supported = false;
+        return;
+    }
+    XrPassthroughCreateInfoFB pci = {XR_TYPE_PASSTHROUGH_CREATE_INFO_FB};
+    XrResult r = g.pfnCreatePassthrough(g.session, &pci, &g.pt);
+    if (XR_FAILED(r)) {
+        LOGE("xrCreatePassthroughFB failed %d", (int) r);
+        g.pt_supported = false;
+        return;
+    }
+    XrPassthroughLayerCreateInfoFB lci = {XR_TYPE_PASSTHROUGH_LAYER_CREATE_INFO_FB};
+    lci.passthrough = g.pt;
+    lci.purpose = XR_PASSTHROUGH_LAYER_PURPOSE_RECONSTRUCTION_FB;
+    r = g.pfnCreatePassthroughLayer(g.session, &lci, &g.pt_layer);
+    if (XR_FAILED(r)) {
+        LOGE("xrCreatePassthroughLayerFB failed %d", (int) r);
+        g.pt_supported = false;
+        return;
+    }
+    LOGI("passthrough ready");
+}
+
+static void passthrough_set(bool on)
+{
+    if (!g.pt_supported) {
+        g.pt_on = false;
+        return;
+    }
+    if (on) {
+        g.pfnPassthroughStart(g.pt);
+        g.pfnPassthroughLayerResume(g.pt_layer);
+    } else {
+        g.pfnPassthroughLayerPause(g.pt_layer);
+        g.pfnPassthroughPause(g.pt);
+    }
+    g.pt_on = on;
+    if (g.state_path[0]) {
+        if (on) {
+            FILE *f = fopen(g.state_path, "w");
+            if (f) fclose(f);
+        } else {
+            unlink(g.state_path);
+        }
+    }
+    LOGI("passthrough %s", on ? "on" : "off");
 }
 
 /* ---------------------------------------------------------------- Java callbacks */
@@ -664,6 +758,7 @@ static void poll_input(void)
     if (fabsf(ry) < fabsf(r.y)) ry = r.y;
 
     if (b != g.buttons) LOGI("buttons 0x%x", b);
+    if ((b & BTN_LSTICK) && !(g.buttons & BTN_LSTICK)) passthrough_set(!g.pt_on);
     g.buttons = b;
     (*g.env)->CallStaticVoidMethod(g.env, g.bridge, g.on_input, (jint) b, lx, ly, rx, ry);
     if ((*g.env)->ExceptionCheck(g.env)) {
@@ -684,7 +779,10 @@ static void handle_events(void)
             if (g.state == XR_SESSION_STATE_READY) {
                 XrSessionBeginInfo bi = {XR_TYPE_SESSION_BEGIN_INFO};
                 bi.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-                if (XR_SUCCEEDED(xrBeginSession(g.session, &bi))) g.session_running = true;
+                if (XR_SUCCEEDED(xrBeginSession(g.session, &bi))) {
+                    g.session_running = true;
+                    if (g.pt_on) passthrough_set(true);
+                }
             } else if (g.state == XR_SESSION_STATE_STOPPING) {
                 xrEndSession(g.session);
                 g.session_running = false;
@@ -780,6 +878,7 @@ static void draw_layers(const Mat4 *mvp)
     for (size_t i = 0; i < sizeof(order) / sizeof(order[0]); i++) {
         const int id = order[i];
         if (!(g.current.mask & (1 << id))) continue;
+        if (g.pt_on && id < LAYER_BG_COUNT) continue; /* room instead of the game backgrounds */
         float top, bottom;
         layer_disparity(id, &top, &bottom);
         glUniform2f(g.u_disp, top, bottom);
@@ -818,8 +917,9 @@ static void render_frame(void)
     XrFrameBeginInfo bi = {XR_TYPE_FRAME_BEGIN_INFO};
     if (XR_FAILED(xrBeginFrame(g.session, &bi))) return;
 
-    const XrCompositionLayerBaseHeader *layers[1];
+    const XrCompositionLayerBaseHeader *layers[2];
     uint32_t layer_count = 0;
+    XrCompositionLayerPassthroughFB ptl = {XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
     XrCompositionLayerProjection proj = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     XrCompositionLayerProjectionView pv[2];
 
@@ -838,7 +938,8 @@ static void render_frame(void)
         glDisable(GL_CULL_FACE);
         for (int i = 0; i < 2; i++) {
             acquire(&g.eye[i]);
-            glClearColor(g.bg_r, g.bg_g, g.bg_b, 1.0f);
+            if (g.pt_on) glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+            else glClearColor(g.bg_r, g.bg_g, g.bg_b, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
             if (g.have_frame) {
                 const Mat4 p = mat_projection(g.views[i].fov, 0.05f, 200.0f);
@@ -861,6 +962,12 @@ static void render_frame(void)
         proj.space = g.local_space;
         proj.viewCount = 2;
         proj.views = pv;
+        if (g.pt_on) {
+            ptl.layerHandle = g.pt_layer;
+            layers[layer_count++] = (const XrCompositionLayerBaseHeader *) &ptl;
+            /* Eye images are premultiplied: transparent pixels show the room. */
+            proj.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+        }
         layers[layer_count++] = (const XrCompositionLayerBaseHeader *) &proj;
     }
 
