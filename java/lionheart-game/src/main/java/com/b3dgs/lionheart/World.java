@@ -194,10 +194,29 @@ final class World extends WorldHelper implements MusicPlayer, LoadNextStage
     private double trackerY;
     private StateHandler player;
     private Difficulty difficulty;
-    /** Save confirmation remaining frames (VR port). */
-    private int savedMessage;
-    /** Save confirmation text. */
-    private String savedText = "";
+    /** In-level quick save / load menu (VR port). */
+    private final QuickMenu quickMenu = new QuickMenu();
+    /** Quick menu access to this level. */
+    private final QuickMenu.Host quickHost = new QuickMenu.Host()
+    {
+        @Override
+        public GameConfig getGame()
+        {
+            return game;
+        }
+
+        @Override
+        public InitConfig snapshot()
+        {
+            return checkpointSnapshot();
+        }
+
+        @Override
+        public void load(InitConfig init)
+        {
+            sequencer.end(SceneBlack.class, game.with(init));
+        }
+    };
     private Action rasterRenderer = () ->
     {
         // Nothing to do
@@ -1532,25 +1551,21 @@ final class World extends WorldHelper implements MusicPlayer, LoadNextStage
     /**
      * Save the progress at the last reached checkpoint (story mode).
      */
-    private void saveAtCheckpoint()
+    private InitConfig checkpointSnapshot()
     {
         if (!game.getType().is(GameType.STORY) || game.getStages().isEmpty() || player == null)
         {
-            savedText = "SAVE: STORY MODE ONLY";
-            savedMessage = source.getRate() * 2;
-            return;
+            return null;
         }
         final Coord check = checkpoints.getCurrent(player.getFeature(Transformable.class));
         final Coord tile = new Coord(Math.floor(check.getX() / map.getTileWidth()),
                                      Math.floor(check.getY() / map.getTileHeight()));
-        Util.saveProgress(game.with(Util.getInitConfig(services.get(Media.class),
-                                                       player,
-                                                       difficulty,
-                                                       cheats.isEnabled(),
-                                                       Optional.of(tile))));
-        LOGGER.info("Saved at checkpoint tile {} {}", tile.getX(), tile.getY());
-        savedText = "GAME SAVED";
-        savedMessage = source.getRate() * 2;
+        LOGGER.info("Checkpoint snapshot at tile {} {}", tile.getX(), tile.getY());
+        return Util.getInitConfig(services.get(Media.class),
+                                  player,
+                                  difficulty,
+                                  cheats.isEnabled(),
+                                  Optional.of(tile));
     }
 
     @Override
@@ -1639,13 +1654,9 @@ final class World extends WorldHelper implements MusicPlayer, LoadNextStage
     @Override
     public void update(double extrp)
     {
-        if (SaveRequest.consume())
+        if (quickMenu.update(quickHost, source.getRate()))
         {
-            saveAtCheckpoint();
-        }
-        if (savedMessage > 0)
-        {
-            savedMessage--;
+            return;
         }
         updateSpawn(extrp);
 
@@ -1738,10 +1749,7 @@ final class World extends WorldHelper implements MusicPlayer, LoadNextStage
                 }
             }
             cheats.render(g);
-            if (savedMessage > 0)
-            {
-                text.draw(g, source.getWidth() / 2, 24, Align.CENTER, savedText);
-            }
+            quickMenu.render(g, text, source.getWidth(), source.getHeight());
             StereoLayers.end(g);
         }
     }

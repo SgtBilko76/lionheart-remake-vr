@@ -7,7 +7,7 @@ import android.graphics.SurfaceTexture;
 import android.view.KeyEvent;
 
 import com.b3dgs.lionengine.android.Gamepad;
-import com.b3dgs.lionheart.SaveRequest;
+import com.b3dgs.lionheart.QuickMenu;
 
 /**
  * Bridge to the native OpenXR host (liblionheartxr.so).
@@ -31,8 +31,16 @@ public final class XrBridge
         KeyEvent.KEYCODE_BUTTON_THUMBR, // right stick click
     };
 
-    /** Menu button bit (lionheart_xr.c BTN_MENU). */
+    /** Button bits (lionheart_xr.c). */
+    private static final int BTN_A = 1 << 0;
+    private static final int BTN_B = 1 << 1;
     private static final int BTN_MENU = 1 << 8;
+    private static final float STICK_PUSH = 0.6f;
+    private static final float STICK_REST = 0.3f;
+
+    /** Keys currently pressed on the game's pad. */
+    private static int padHeld;
+    private static boolean stickArmed = true;
 
     private static volatile Gamepad gamepad;
     private static int previous;
@@ -84,31 +92,91 @@ public final class XrBridge
             return;
         }
         final int changed = buttons ^ previous;
-        // Menu button: save at the last checkpoint, only while a level is running.
-        if ((changed & BTN_MENU) != 0 && (buttons & BTN_MENU) != 0 && StereoRouter.isScene())
+        final int pressed = changed & buttons;
+        previous = buttons;
+
+        // Menu button: quick save / load menu, only while a level is running.
+        if ((pressed & BTN_MENU) != 0 && StereoRouter.isScene())
         {
-            SaveRequest.request();
+            QuickMenu.post(QuickMenu.EVENT_TOGGLE);
+        }
+        if (QuickMenu.isOpen())
+        {
+            menuInput(pad, pressed, lx, ly);
+            return;
         }
         for (int i = 0; i < BUTTON_KEYCODES.length; i++)
         {
             final int bit = 1 << i;
             if ((changed & bit) != 0)
             {
-                if ((buttons & bit) != 0)
+                if ((buttons & bit) != 0 && (padHeld & bit) == 0)
                 {
+                    padHeld |= bit;
                     pad.onKeyDown(BUTTON_KEYCODES[i], null);
                 }
-                else
+                else if ((buttons & bit) == 0 && (padHeld & bit) != 0)
                 {
+                    padHeld &= ~bit;
                     pad.onKeyUp(BUTTON_KEYCODES[i], null);
                 }
             }
         }
-        previous = buttons;
 
         // Only the left stick moves (menus and levels); the right stick is ignored.
         // Android axis convention has y pointing down.
         pad.setAxes(lx, -ly);
+    }
+
+    /**
+     * Touch drives the quick menu; the game gets no input meanwhile (held keys released, stick neutral). Buttons
+     * that were held when the menu opened only reach the game again after a fresh press.
+     */
+    private static void menuInput(Gamepad pad, int pressed, float lx, float ly)
+    {
+        for (int i = 0; i < BUTTON_KEYCODES.length; i++)
+        {
+            final int bit = 1 << i;
+            if ((padHeld & bit) != 0)
+            {
+                padHeld &= ~bit;
+                pad.onKeyUp(BUTTON_KEYCODES[i], null);
+            }
+        }
+        pad.setAxes(0.0, 0.0);
+
+        if ((pressed & BTN_A) != 0)
+        {
+            QuickMenu.post(QuickMenu.EVENT_CONFIRM);
+        }
+        if ((pressed & BTN_B) != 0)
+        {
+            QuickMenu.post(QuickMenu.EVENT_BACK);
+        }
+
+        // Stick flicks with re-arm, so one push moves one entry.
+        if (stickArmed)
+        {
+            if (ly > STICK_PUSH)
+            {
+                QuickMenu.post(QuickMenu.EVENT_UP);
+                stickArmed = false;
+            }
+            else if (ly < -STICK_PUSH)
+            {
+                QuickMenu.post(QuickMenu.EVENT_DOWN);
+                stickArmed = false;
+            }
+            else if (Math.abs(lx) > STICK_PUSH)
+            {
+                QuickMenu.post(QuickMenu.EVENT_SWITCH);
+                stickArmed = false;
+            }
+        }
+        else if (Math.abs(lx) < STICK_REST && Math.abs(ly) < STICK_REST)
+        {
+            stickArmed = true;
+        }
     }
 
     private static native void nativeStart(ActivityLionheartVR activity,
