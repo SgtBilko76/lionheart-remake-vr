@@ -148,7 +148,8 @@ final class MediaAndroid implements Media
     private String getPathTemp()
     {
         return UtilFolder.getPathSeparator(File.separator,
-                                           context.getCacheDir().getAbsolutePath(),
+                                           // Quest port: app files dir, not the cache (save games must survive)
+                                           context.getFilesDir().getAbsolutePath(),
                                            path.replace(separator, File.separator));
     }
 

@@ -194,6 +194,10 @@ final class World extends WorldHelper implements MusicPlayer, LoadNextStage
     private double trackerY;
     private StateHandler player;
     private Difficulty difficulty;
+    /** Save confirmation remaining frames (VR port). */
+    private int savedMessage;
+    /** Save confirmation text. */
+    private String savedText = "";
     private Action rasterRenderer = () ->
     {
         // Nothing to do
@@ -1525,6 +1529,30 @@ final class World extends WorldHelper implements MusicPlayer, LoadNextStage
         spawnTick.start();
     }
 
+    /**
+     * Save the progress at the last reached checkpoint (story mode).
+     */
+    private void saveAtCheckpoint()
+    {
+        if (!game.getType().is(GameType.STORY) || game.getStages().isEmpty() || player == null)
+        {
+            savedText = "SAVE: STORY MODE ONLY";
+            savedMessage = source.getRate() * 2;
+            return;
+        }
+        final Coord check = checkpoints.getCurrent(player.getFeature(Transformable.class));
+        final Coord tile = new Coord(Math.floor(check.getX() / map.getTileWidth()),
+                                     Math.floor(check.getY() / map.getTileHeight()));
+        Util.saveProgress(game.with(Util.getInitConfig(services.get(Media.class),
+                                                       player,
+                                                       difficulty,
+                                                       cheats.isEnabled(),
+                                                       Optional.of(tile))));
+        LOGGER.info("Saved at checkpoint tile {} {}", tile.getX(), tile.getY());
+        savedText = "GAME SAVED";
+        savedMessage = source.getRate() * 2;
+    }
+
     @Override
     public void loadNextStage(String next, int delayMs, Optional<Coord> spawn)
     {
@@ -1611,6 +1639,14 @@ final class World extends WorldHelper implements MusicPlayer, LoadNextStage
     @Override
     public void update(double extrp)
     {
+        if (SaveRequest.consume())
+        {
+            saveAtCheckpoint();
+        }
+        if (savedMessage > 0)
+        {
+            savedMessage--;
+        }
         updateSpawn(extrp);
 
         if (server)
@@ -1702,6 +1738,10 @@ final class World extends WorldHelper implements MusicPlayer, LoadNextStage
                 }
             }
             cheats.render(g);
+            if (savedMessage > 0)
+            {
+                text.draw(g, source.getWidth() / 2, 24, Align.CENTER, savedText);
+            }
             StereoLayers.end(g);
         }
     }

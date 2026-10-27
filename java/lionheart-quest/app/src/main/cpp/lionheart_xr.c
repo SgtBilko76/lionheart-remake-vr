@@ -168,6 +168,7 @@ typedef struct {
     PFN_xrPassthroughLayerResumeFB pfnPassthroughLayerResume;
     PFN_xrPassthroughLayerPauseFB pfnPassthroughLayerPause;
     char state_path[512];
+    char smooth_path[512];
     int last_logged_mask;
 } App;
 
@@ -199,6 +200,7 @@ static void load_config(const char *dir)
     g.bg_b = 0.0f;
     if (!dir) return;
     snprintf(g.state_path, sizeof(g.state_path), "%s/passthrough.on", dir);
+    snprintf(g.smooth_path, sizeof(g.smooth_path), "%s/smooth.off", dir);
     if (access(g.state_path, F_OK) == 0) g.pt_on = true;
     char path[512];
     snprintf(path, sizeof(path), "%s/vr.cfg", dir);
@@ -232,6 +234,28 @@ static void load_config(const char *dir)
         }
     }
     fclose(f);
+}
+
+/* Right stick click choice (sharp pixels / soft), remembered across starts; overrides vr.cfg. */
+static void load_smooth_state(void)
+{
+    if (g.smooth_path[0] && access(g.smooth_path, F_OK) == 0) g.smooth = 0.0f;
+}
+
+static void toggle_smooth(void)
+{
+    g.smooth = g.smooth >= 0.5f ? 0.0f : 1.0f;
+    if (g.smooth_path[0]) {
+        if (g.smooth < 0.5f) {
+            FILE *f = fopen(g.smooth_path, "w");
+            if (f) fclose(f);
+        } else {
+            unlink(g.smooth_path);
+        }
+    }
+    /* Force a fresh upscale with the next frame. */
+    for (int i = 0; i < 8; i++) g.up_w[i] = g.up_h[i] = 0;
+    LOGI("smooth %s", g.smooth >= 0.5f ? "on" : "off");
 }
 
 /* ---------------------------------------------------------------- math */
@@ -887,6 +911,7 @@ static void poll_input(void)
 
     if (b != g.buttons) LOGI("buttons 0x%x", b);
     if ((b & BTN_LSTICK) && !(g.buttons & BTN_LSTICK)) passthrough_set(!g.pt_on);
+    if ((b & BTN_RSTICK) && !(g.buttons & BTN_RSTICK)) toggle_smooth();
     g.buttons = b;
     (*g.env)->CallStaticVoidMethod(g.env, g.bridge, g.on_input, (jint) b, lx, ly, rx, ry);
     if ((*g.env)->ExceptionCheck(g.env)) {
@@ -1224,6 +1249,7 @@ JNIEXPORT void JNICALL Java_com_b3dgs_lionheart_quest_XrBridge_nativeStart(JNIEn
     g.atlas_h = h;
     const char *dir = files_dir ? (*env)->GetStringUTFChars(env, files_dir, NULL) : NULL;
     load_config(dir);
+    load_smooth_state();
     if (dir) (*env)->ReleaseStringUTFChars(env, files_dir, dir);
     g.running = true;
     pthread_create(&g.thread, NULL, xr_thread, NULL);

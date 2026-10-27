@@ -7,6 +7,7 @@ import android.graphics.SurfaceTexture;
 import android.view.KeyEvent;
 
 import com.b3dgs.lionengine.android.Gamepad;
+import com.b3dgs.lionheart.SaveRequest;
 
 /**
  * Bridge to the native OpenXR host (liblionheartxr.so).
@@ -29,6 +30,9 @@ public final class XrBridge
         KeyEvent.KEYCODE_BUTTON_THUMBL, // left stick click
         KeyEvent.KEYCODE_BUTTON_THUMBR, // right stick click
     };
+
+    /** Menu button bit (lionheart_xr.c BTN_MENU). */
+    private static final int BTN_MENU = 1 << 8;
 
     private static volatile Gamepad gamepad;
     private static int previous;
@@ -80,6 +84,11 @@ public final class XrBridge
             return;
         }
         final int changed = buttons ^ previous;
+        // Menu button: save at the last checkpoint, only while a level is running.
+        if ((changed & BTN_MENU) != 0 && (buttons & BTN_MENU) != 0 && StereoRouter.isScene())
+        {
+            SaveRequest.request();
+        }
         for (int i = 0; i < BUTTON_KEYCODES.length; i++)
         {
             final int bit = 1 << i;
