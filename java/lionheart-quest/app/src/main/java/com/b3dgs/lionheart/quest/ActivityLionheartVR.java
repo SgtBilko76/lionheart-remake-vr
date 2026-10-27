@@ -75,7 +75,9 @@ public final class ActivityLionheartVR extends ActivityGame
                                                      settings.getResolution(Constant.RESOLUTION_OUTPUT).rate());
         final Config config = Config.fullscreen(resolution);
         ScreenAndroid.setSize(config);
-        Loader.startAsync(config, Loading.class, new GameConfig(), Boolean.FALSE);
+        // Two-button mode by default: only B jumps; stick up only climbs and aims upward attacks.
+        // (The game's Options menu can still switch to the original one-button mode.)
+        Loader.startAsync(config, Loading.class, new GameConfig().with(false), Boolean.FALSE);
     }
 
     @Override
