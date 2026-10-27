@@ -33,12 +33,16 @@
     <lionengine:device index="1" class="com.b3dgs.lionengine.android.Gamepad" name="Gamepad">
         <lionengine:horizontal positive="2" negative="1"/>
         <lionengine:vertical positive="0" negative="3"/>
+        <!-- Quest port: left trigger (L2 104) = jump, right trigger (R2 105) = attack, B / A keep working.
+             Page down (original cheat code) moved to the left grip with Tab. -->
         <lionengine:fire index="JUMP" positive="97"/>
+        <lionengine:fire index="JUMP" positive="104"/>
         <lionengine:fire index="ATTACK" positive="96"/>
+        <lionengine:fire index="ATTACK" positive="105"/>
         <lionengine:fire index="PAUSE" positive="100"/>
         <lionengine:fire index="QUIT" positive="99"/>
         <lionengine:fire index="TAB" positive="102"/>
+        <lionengine:fire index="PAGE_DOWN" positive="102"/>
         <lionengine:fire index="CHEAT" positive="103"/>
-        <lionengine:fire index="PAGE_DOWN" positive="104"/>
     </lionengine:device>
 </lionengine:input>
