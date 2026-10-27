@@ -12,27 +12,34 @@ The whole game is in the APK: no extra data, no PC needed.
 - **Passthrough mode:** press the left stick to swap the game's sky and backgrounds for your room; the playfield
   floats in your room. The game remembers the mode.
 - **Smoothed pixel art:** every layer is upscaled 4x with an edge-directed pixel-art scaler, then sharpened.
+  Press the right stick to switch between the soft picture and the original sharp pixels (remembered).
+- **Sharp text:** menus, messages and the info line are drawn at high resolution.
+- **Quick save / load menu:** the menu button opens it in a level: 5 save slots at your last checkpoint, plus the
+  automatic save at every level start. The main menu's *Continue* works on Quest too.
+- **Two-button controls:** only B / left trigger jump, stick up climbs and aims upward attacks.
 - 72 FPS, Touch controllers mapped onto the game's own gamepad support.
 
 ## Install
 1. Enable developer mode for your headset (Meta Horizon app > Devices > Developer mode).
-2. Install `Lionheart-3D-v0.1.0-beta.apk` with SideQuest or `adb install -r Lionheart-3D-v0.1.0-beta.apk`.
+2. Install `Lionheart-3D-v0.2.0-beta.apk` with SideQuest or `adb install -r Lionheart-3D-v0.2.0-beta.apk`.
 3. Start **Lionheart 3D** from the app library (*Unknown sources*).
 
 ## Controls
 | Touch | Game |
 |---|---|
-| Left stick | move Valdyn / menu selection |
+| Left stick | move Valdyn / menu selection (up = climb, up + attack = upward attack) |
+| Right trigger or A | attack / confirm |
+| Left trigger or B | jump |
+| Menu button | quick save / load menu (in a level) |
 | Left stick click | passthrough on/off |
-| A | attack / confirm |
-| B | jump |
+| Right stick click | soft picture / sharp pixels |
 | Y | pause |
 | X | quit / back |
 | Left grip | player list (Tab) |
 | Right grip | cheat menu |
-| Left trigger | page down |
 
-The right stick is not used.
+Quick menu: stick up/down chooses a slot, stick left/right switches between LOAD and SAVE, A confirms,
+B closes. The game's *Options → Joystick* still offers the original one-button mode (stick up jumps).
 
 ## Settings
 Optional: copy [`vr.cfg.example`](vr.cfg.example) to the headset as
