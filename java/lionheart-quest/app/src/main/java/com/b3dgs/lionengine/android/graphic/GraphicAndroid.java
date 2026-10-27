@@ -40,7 +40,7 @@ import java.util.Map;
 /**
  * Main interface with the graphic output, representing the screen buffer.
  */
-final class GraphicAndroid implements Graphic
+public final class GraphicAndroid implements Graphic
 {
     /** Gradient cache. */
     private final Map<ColorGradient, LinearGradient> colorGradients = new HashMap<>();
@@ -64,6 +64,8 @@ final class GraphicAndroid implements Graphic
     GraphicAndroid()
     {
         this(null);
+        // Quest port: frame graphics (sequence/screen) may redirect text to the high resolution layer.
+        frame = true;
     }
 
     /**
@@ -91,8 +93,49 @@ final class GraphicAndroid implements Graphic
     void drawString(int x, int y, Align alignment, String text, Paint paint)
     {
         paint.setTextAlign(Paint.Align.valueOf(alignment.name()));
+        final TextSink sink = textSink;
+        if (frame && sink != null && g != null)
+        {
+            final Canvas target = sink.canvasFor(g.getWidth(), g.getHeight());
+            if (target != null)
+            {
+                target.drawText(text, x, y, paint);
+                return;
+            }
+        }
         g.drawText(text, x, y, paint);
     }
+
+    /**
+     * Quest port: receiver of vector text drawn on frame graphics, rendered at a higher resolution.
+     */
+    public interface TextSink
+    {
+        /**
+         * Get the canvas for text, in the same coordinates as the frame (scaled up internally).
+         *
+         * @param width The frame width.
+         * @param height The frame height.
+         * @return The canvas, <code>null</code> to draw in the frame as usual.
+         */
+        Canvas canvasFor(int width, int height);
+    }
+
+    /** Quest port: text sink. */
+    private static volatile TextSink textSink;
+
+    /**
+     * Quest port: set the text sink.
+     *
+     * @param sink The sink (<code>null</code> to disable).
+     */
+    public static void setTextSink(TextSink sink)
+    {
+        textSink = sink;
+    }
+
+    /** Quest port: true for frame graphics (not image buffer graphics). */
+    private boolean frame;
 
     /*
      * Graphic

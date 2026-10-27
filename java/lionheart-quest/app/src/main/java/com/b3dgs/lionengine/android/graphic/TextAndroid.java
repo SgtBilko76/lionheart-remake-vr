@@ -94,6 +94,8 @@ final class TextAndroid implements Text
 
         this.size = size - 3;
         paint = new Paint();
+        // Quest port: smooth vector text (drawn at high resolution in the VR text layer).
+        paint.setAntiAlias(true);
         align = Align.LEFT;
         color = ColorRgba.WHITE;
         paint.setTextSize(this.size);

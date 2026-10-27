@@ -9,23 +9,30 @@ import android.graphics.Paint;
 import android.graphics.PorterDuff;
 import android.graphics.Rect;
 
+import com.b3dgs.lionengine.android.graphic.GraphicAndroid;
 import com.b3dgs.lionengine.android.graphic.ScreenAndroid;
 import com.b3dgs.lionengine.graphic.Graphic;
 import com.b3dgs.lionheart.StereoLayers;
 
 /**
  * Routes each stereo layer of the scene into its own bitmap, then packs the engine frame buffer and the layers
- * into one atlas (2 x 4 cells of 640x480) that the OpenXR host renders at different depths.
+ * into one atlas (2 x 4 cells of 640x480) that the OpenXR host renders at different depths. Vector text (menus,
+ * messages, info) goes to a separate high resolution layer below the cells (1280x960, frame scaled up to fit).
  * Everything runs on the game thread.
  */
-final class StereoRouter implements StereoLayers.Router, ScreenAndroid.VrCompositor
+final class StereoRouter implements StereoLayers.Router, ScreenAndroid.VrCompositor, GraphicAndroid.TextSink
 {
     static final int CELL_W = 640;
     static final int CELL_H = 480;
     static final int COLS = 2;
     static final int ROWS = 4;
     static final int ATLAS_W = CELL_W * COLS;
-    static final int ATLAS_H = CELL_H * ROWS;
+    static final int TEXT_W = 1280;
+    static final int TEXT_H = 960;
+    static final int TEXT_Y = CELL_H * ROWS;
+    static final int ATLAS_H = TEXT_Y + TEXT_H;
+    /** Text layer id in the frame info mask (cell 7 is unused by the scene layers). */
+    static final int TEXT_LAYER = 7;
     private static final int LAYERS = COLS * ROWS;
     private static final int PLAYFIELD_BIT = 1 << StereoLayers.PLAYFIELD;
 
@@ -56,6 +63,14 @@ final class StereoRouter implements StereoLayers.Router, ScreenAndroid.VrComposi
     private int doneMask;
     private int doneKinds;
 
+    /** High resolution text layer. */
+    private final Bitmap textBitmap = Bitmap.createBitmap(TEXT_W, TEXT_H, Bitmap.Config.ARGB_8888);
+    private final Canvas textCanvas = new Canvas(textBitmap);
+    private boolean textUsed;
+    private int textW;
+    private int textH;
+    private final Paint textPaint = new Paint();
+
     private int postMask;
     private int postKinds;
     private int postWidth;
@@ -65,6 +80,43 @@ final class StereoRouter implements StereoLayers.Router, ScreenAndroid.VrComposi
     {
         paint.setFilterBitmap(false);
         paint.setAntiAlias(false);
+        textPaint.setFilterBitmap(false);
+    }
+
+    /**
+     * Text scale for a frame size.
+     *
+     * @param width The frame width.
+     * @param height The frame height.
+     * @return The scale (frame to text layer).
+     */
+    static float textScale(int width, int height)
+    {
+        return Math.min(TEXT_W / (float) width, TEXT_H / (float) height);
+    }
+
+    /*
+     * GraphicAndroid.TextSink
+     */
+
+    @Override
+    public Canvas canvasFor(int width, int height)
+    {
+        if (width <= 0 || height <= 0 || width > TEXT_W || height > TEXT_H)
+        {
+            return null;
+        }
+        if (!textUsed || width != textW || height != textH)
+        {
+            final float scale = textScale(width, height);
+            textCanvas.setMatrix(null);
+            textCanvas.drawColor(0, PorterDuff.Mode.CLEAR);
+            textCanvas.scale(scale, scale);
+            textUsed = true;
+            textW = width;
+            textH = height;
+        }
+        return textCanvas;
     }
 
     private Canvas getLayerCanvas(int id, int width, int height)
@@ -175,7 +227,21 @@ final class StereoRouter implements StereoLayers.Router, ScreenAndroid.VrComposi
             }
         }
 
-        postMask = layers | PLAYFIELD_BIT;
+        int text = 0;
+        if (textUsed)
+        {
+            // Text layer content: the frame size scaled up (same aspect as the cells).
+            final float scale = textScale(textW, textH);
+            final int tw = Math.round(textW * scale);
+            final int th = Math.round(textH * scale);
+            src.set(0, 0, tw, th);
+            dst.set(0, TEXT_Y, tw, TEXT_Y + th);
+            atlas.drawBitmap(textBitmap, src, dst, textPaint);
+            textUsed = false;
+            text = 1 << TEXT_LAYER;
+        }
+
+        postMask = layers | PLAYFIELD_BIT | text;
         postKinds = layerKinds;
         postWidth = w;
         postHeight = h;

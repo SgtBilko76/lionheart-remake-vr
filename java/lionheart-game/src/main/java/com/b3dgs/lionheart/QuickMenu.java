@@ -36,6 +36,7 @@ import com.b3dgs.lionengine.UtilConversion;
 import com.b3dgs.lionengine.geom.Coord;
 import com.b3dgs.lionengine.graphic.ColorRgba;
 import com.b3dgs.lionengine.graphic.Graphic;
+import com.b3dgs.lionengine.graphic.Graphics;
 import com.b3dgs.lionengine.graphic.Text;
 import com.b3dgs.lionengine.io.FileReading;
 import com.b3dgs.lionengine.io.FileWriting;
@@ -93,7 +94,9 @@ public final class QuickMenu
     private static final Logger LOGGER = LoggerFactory.getLogger(QuickMenu.class);
     private static final Queue<Integer> EVENTS = new ConcurrentLinkedQueue<>();
     private static final Pattern STAGE_NUMBER = Pattern.compile("(\\d+)");
-    private static final ColorRgba BACKGROUND = new ColorRgba(0, 0, 0, 200);
+    private static final ColorRgba BACKGROUND = new ColorRgba(0, 0, 0, 235);
+    /** Menu font size (game pixels); drawn at high resolution in the VR text layer. */
+    private static final int FONT_SIZE = 14;
     private static final ColorRgba FRAME = new ColorRgba(200, 160, 60);
     private static final ColorRgba HIGHLIGHT = new ColorRgba(255, 220, 90);
     private static final ColorRgba DIM = new ColorRgba(150, 150, 150);
@@ -120,6 +123,7 @@ public final class QuickMenu
     }
 
     private final String[] labels = new String[SLOTS + 1];
+    private final Text font = Graphics.createText(FONT_SIZE);
     private boolean saveMode;
     private int choice;
     private String message = "";
@@ -260,8 +264,9 @@ public final class QuickMenu
      * @param width The screen width.
      * @param height The screen height.
      */
-    public void render(Graphic g, Text text, int width, int height)
+    public void render(Graphic g, Text levelText, int width, int height)
     {
+        final Text text = font;
         if (messageFrames > 0)
         {
             text.setColor(ColorRgba.WHITE);
@@ -272,7 +277,7 @@ public final class QuickMenu
             return;
         }
         final int line = text.getSize() + 4;
-        final int w = Math.min(width - 16, 260);
+        final int w = Math.min(width - 8, 300);
         final int h = line * (SLOTS + 5);
         final int x = (width - w) / 2;
         final int y = (height - h) / 2;

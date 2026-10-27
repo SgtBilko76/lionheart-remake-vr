@@ -12,6 +12,7 @@ import com.b3dgs.lionengine.Config;
 import com.b3dgs.lionengine.Resolution;
 import com.b3dgs.lionengine.android.ActivityGame;
 import com.b3dgs.lionengine.android.graphic.EngineAndroid;
+import com.b3dgs.lionengine.android.graphic.GraphicAndroid;
 import com.b3dgs.lionengine.android.graphic.ScreenAndroid;
 import com.b3dgs.lionengine.audio.AudioFactory;
 import com.b3dgs.lionengine.audio.sc68.Sc68Format;
@@ -50,6 +51,7 @@ public final class ActivityLionheartVR extends ActivityGame
         final StereoRouter router = new StereoRouter();
         StereoLayers.setRouter(router);
         ScreenAndroid.setVrCompositor(router);
+        GraphicAndroid.setTextSink(router);
 
         final File files = getExternalFilesDir(null);
         XrBridge.start(this,

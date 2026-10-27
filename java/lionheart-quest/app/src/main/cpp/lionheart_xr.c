@@ -68,6 +68,11 @@ enum {
 #define LAYER_PLAYFIELD 4
 #define LAYER_FOREGROUND 5
 #define LAYER_HUD 6
+/* High resolution text layer (StereoRouter.TEXT_*): below the cells, frame scaled up to fit 1280x960. */
+#define LAYER_TEXT 7
+#define TEXT_Y 1920
+#define TEXT_W 1280
+#define TEXT_H 960
 #define MESH_ROWS 32
 #define MESH_COLS 48
 #define MESH_INDICES (MESH_ROWS * MESH_COLS * 6)
@@ -1009,7 +1014,7 @@ static void upscale_layers(void)
         glUseProgram(g.scale_prog);
         glUniform1i(g.s_src, 0);
         for (int id = 0; id < 8; id++) {
-            if (!(g.current.mask & (1 << id))) continue;
+            if (!(g.current.mask & (1 << id)) || id == LAYER_TEXT) continue;
             if (g.up_w[id] != w || g.up_h[id] != h) {
                 make_target(&g.up2_tex[id], &g.up2_fbo[id], w * 2, h * 2);
                 make_target(&g.up4_tex[id], &g.up4_fbo[id], w * 4, h * 4);
@@ -1054,6 +1059,8 @@ static void layer_disparity(int id, float *top, float *bottom)
         *top = *bottom = 1.0f / g.depth_fg;
     } else if (id == LAYER_HUD) {
         *top = *bottom = 1.0f / g.depth_hud;
+    } else if (id == LAYER_TEXT && (g.current.mask & (1 << LAYER_HUD))) {
+        *top = *bottom = 1.0f / g.depth_hud; /* text of a level floats with the HUD */
     }
 }
 
@@ -1080,7 +1087,7 @@ static void draw_layers(const Mat4 *mvp)
     glBindVertexArray(g.vao);
 
     /* Far to near. */
-    static const int order[] = {0, 1, 2, LAYER_PLAYFIELD, LAYER_FOREGROUND, LAYER_HUD};
+    static const int order[] = {0, 1, 2, LAYER_PLAYFIELD, LAYER_FOREGROUND, LAYER_HUD, LAYER_TEXT};
     for (size_t i = 0; i < sizeof(order) / sizeof(order[0]); i++) {
         const int id = order[i];
         if (!(g.current.mask & (1 << id))) continue;
@@ -1088,7 +1095,13 @@ static void draw_layers(const Mat4 *mvp)
         float top, bottom;
         layer_disparity(id, &top, &bottom);
         glUniform2f(g.u_disp, top, bottom);
-        if (smooth) {
+        if (id == LAYER_TEXT) {
+            const float s = fminf((float) TEXT_W / (float) g.current.w, (float) TEXT_H / (float) g.current.h);
+            glBindTexture(GL_TEXTURE_2D, g.atlas_tex);
+            glUniform4f(g.u_rect, 0.0f, (float) TEXT_Y, roundf(g.current.w * s), roundf(g.current.h * s));
+            glUniform2f(g.u_texsize, (float) g.atlas_w, (float) g.atlas_h);
+            glUniform1f(g.u_sharpen, 0.0f);
+        } else if (smooth) {
             const int w4 = g.current.w * 4, h4 = g.current.h * 4;
             glBindTexture(GL_TEXTURE_2D, g.up4_tex[id]);
             glUniform4f(g.u_rect, 0.0f, 0.0f, (float) w4, (float) h4);
