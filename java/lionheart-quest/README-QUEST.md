@@ -1,5 +1,7 @@
 # Lionheart 3D - Lionheart Remake for Meta Quest
 
+**Download, install guide, controls and pictures: [portroyale.online/lionheart.html](https://portroyale.online/lionheart.html)**
+
 A standalone Meta Quest 3 / 3S / Pro / 2 port of [Lionheart Remake](https://github.com/b3dgs/lionheart-remake)
 by Byron 3D Games Studio, the remake of Thalion's Amiga classic *Lionheart*.
 The whole game is in the APK: no extra data, no PC needed.
