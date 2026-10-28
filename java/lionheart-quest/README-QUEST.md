@@ -25,6 +25,9 @@ The whole game is in the APK: no extra data, no PC needed.
 3. Start **Lionheart 3D** from the app library (*Unknown sources*).
 
 ## Controls
+
+![Lionheart 3D controller mapping](../../docs/controls.webp)
+
 | Touch | Game |
 |---|---|
 | Left stick | move Valdyn / menu selection (up = climb, up + attack = upward attack) |
